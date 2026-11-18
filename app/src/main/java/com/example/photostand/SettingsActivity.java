@@ -243,7 +243,7 @@ public class SettingsActivity extends Activity {
         new Thread(() -> {
             try {
                 ThumbCache.DiskStats st = ThumbCache.diskStats();
-                String text = "保存先: " + ThumbCache.where
+                String text = "保存先: " + ThumbCache.where + "  (thumbs / full)"
                         + "\nサムネイル: " + st.thumbFiles + " ファイル / " + mb(st.thumbBytes)
                         + "\n  (1枚の写真につき小・中・大の最大3ファイル)"
                         + "\n全画面用: " + st.viewFiles + " ファイル / " + mb(st.viewBytes)
@@ -264,9 +264,11 @@ public class SettingsActivity extends Activity {
         new Thread(() -> {
             Debug.MemoryInfo mi = new Debug.MemoryInfo();
             Debug.getMemoryInfo(mi);
+            long fullRamCap = Runtime.getRuntime().maxMemory() / 2L;
             final String text = "アプリ全体(概算・全画面用も含む): " + mb(mi.getTotalPss() * 1024L)
                     + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
-                    + mb(ThumbCache.memBytes());
+                    + mb(ThumbCache.memBytes())
+                    + "\n全画面RAMの上限(maxMemory/2): " + mb(fullRamCap);
             h.post(() -> {
                 if (destroyed || isFinishing() || memoryInfo == null) return;
                 memoryInfo.setText(text);

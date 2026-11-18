@@ -33,7 +33,8 @@ final class ThumbCache {
     static final String[] TIER_NAME = {"小", "中", "大"};
 
     private static LruCache<String, Bitmap> mem;
-    private static File dir;
+    private static File dir;      // サムネイル用
+    private static File fullDir;  // 全画面用(専用フォルダ)
     private static Context app;
     static String where = "本体";
 
@@ -71,7 +72,29 @@ final class ThumbCache {
         if (base == null) base = app.getCacheDir();
         dir = new File(base, "thumbs");
         dir.mkdirs();
-        new Thread(ThumbCache::pruneNow).start();
+        fullDir = new File(base, "full");
+        fullDir.mkdirs();
+        new Thread(() -> {
+            migrateFullCache();
+            pruneNow();
+        }).start();
+    }
+
+    /** 旧バージョンは全画面用も thumbs に混在していたので、full フォルダへ移行する。 */
+    private static void migrateFullCache() {
+        File[] fs = dir == null ? null : dir.listFiles();
+        if (fs == null || fullDir == null) return;
+        for (File f : fs) {
+            String name = f.getName();
+            if (name.matches("v[0-9a-f]{40}\\.jpg")) {
+                // v1 の全画面キャッシュは旧形式なので削除。
+                f.delete();
+            } else if (name.matches("v2[0-9a-f]{40}\\.jpg")) {
+                File dst = new File(fullDir, name);
+                if (!dst.exists()) f.renameTo(dst);
+                else f.delete();
+            }
+        }
     }
 
     static int tier(Context c) {
@@ -83,9 +106,14 @@ final class ThumbCache {
         Prefs.sp(c).edit().putInt("tier", t).apply();
     }
 
-    /** サムネイルと全画面用キャッシュが共有するディレクトリ。 */
+    /** サムネイル用のディレクトリ。 */
     static File dir() {
         return dir;
+    }
+
+    /** 全画面用キャッシュのディレクトリ。 */
+    static File fullDir() {
+        return fullDir;
     }
 
     private static String memKey(Photos.Item it, int px) {
@@ -204,7 +232,7 @@ final class ThumbCache {
     }
 
     private static void write(File f, Bitmap b) {
-        File tmp = new File(dir, f.getName() + "." + UUID.randomUUID() + ".tmp");
+        File tmp = new File(f.getParentFile(), f.getName() + "." + UUID.randomUUID() + ".tmp");
         try (FileOutputStream o = new FileOutputStream(tmp)) {
             if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
                 throw new java.io.IOException("JPEG compression failed");
@@ -280,19 +308,31 @@ final class ThumbCache {
         int totalFiles() { return thumbFiles + viewFiles; }
     }
 
+    /** 両方のフォルダのファイルをまとめて列挙する。 */
+    private static File[] allFiles(boolean jpgOnly) {
+        ArrayList<File> out = new ArrayList<>();
+        for (File d : new File[]{dir, fullDir}) {
+            File[] fs = d == null ? null : d.listFiles();
+            if (fs == null) continue;
+            for (File f : fs) {
+                if (!f.isFile()) continue;
+                if (jpgOnly && !f.getName().endsWith(".jpg")) continue;
+                out.add(f);
+            }
+        }
+        return out.toArray(new File[0]);
+    }
+
     static DiskStats diskStats() {
         DiskStats st = new DiskStats();
-        File[] fs = dir == null ? null : dir.listFiles();
-        if (fs != null) {
-            for (File f : fs) {
-                if (!f.isFile() || !f.getName().endsWith(".jpg")) continue;
-                if (f.getName().startsWith("v")) {
-                    st.viewBytes += f.length();
-                    st.viewFiles++;
-                } else {
-                    st.thumbBytes += f.length();
-                    st.thumbFiles++;
-                }
+        for (File f : allFiles(true)) {
+            // 移行前の名前に応じても分類できるよう、接頭辞でも判別する。
+            if (f.getName().startsWith("v")) {
+                st.viewBytes += f.length();
+                st.viewFiles++;
+            } else {
+                st.thumbBytes += f.length();
+                st.thumbFiles++;
             }
         }
         return st;
@@ -300,35 +340,31 @@ final class ThumbCache {
 
     /** ディスクとメモリのキャッシュをすべて消す。 */
     static void clearDisk() {
-        File[] fs = dir == null ? null : dir.listFiles();
-        if (fs != null) for (File f : fs) f.delete();
+        for (File f : allFiles(false)) f.delete();
         if (mem != null) mem.evictAll();
     }
 
     /** 書き込み中断・プロセスkillで残った古い .tmp を掃除する(完成済みキャッシュは触らない)。 */
     private static void deleteStaleTemp() {
-        File[] all = dir == null ? null : dir.listFiles();
-        if (all == null) return;
         long cutoff = System.currentTimeMillis() - 60L * 60 * 1000;
-        for (File f : all) {
-            if (!f.isFile() || !f.getName().endsWith(".tmp")) continue;
+        for (File f : allFiles(false)) {
+            if (!f.getName().endsWith(".tmp")) continue;
             if (f.lastModified() < cutoff) f.delete();
         }
     }
 
-    /** 上限を超えていたら、古い完成済みキャッシュから消して上限の8割にする。 */
+    /** 上限を超えていたら、両フォルダの古い完成済みキャッシュから消して上限の8割にする。 */
     static synchronized void pruneNow() {
         try {
             deleteStaleTemp();
-            File[] all = dir == null ? null : dir.listFiles();
-            if (all == null) return;
+            File[] all = allFiles(true);
+            if (all.length == 0) return;
             long limit = Prefs.limitMb(app) * 1024L * 1024L;
             long keep = limit / 5 * 4;
             long total = 0;
             ArrayList<File> complete = new ArrayList<>();
             for (File f : all) {
                 // 書き込み中の .tmp を消すとキャッシュ生成が失敗するため、完成したJPEGだけを扱う。
-                if (!f.isFile() || !f.getName().endsWith(".jpg")) continue;
                 complete.add(f);
                 total += f.length();
             }

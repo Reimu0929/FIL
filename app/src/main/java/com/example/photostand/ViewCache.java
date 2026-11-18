@@ -15,7 +15,7 @@ import java.util.concurrent.FutureTask;
 
 /**
  * 全画面表示用のディスクキャッシュ。画面サイズに縮小した JPEG を
- * サムネイルと同じフォルダに保存する。メモリに全部載せずに先読みできる。
+ * サムネイルとは別の full フォルダに保存する。メモリに全部載せずに先読みできる。
  */
 final class ViewCache {
     private ViewCache() {}
@@ -33,7 +33,7 @@ final class ViewCache {
     }
 
     private static File fileFor(Photos.Item it, int px) {
-        File d = ThumbCache.dir();
+        File d = ThumbCache.fullDir();
         if (d == null) return null;
         // v1 には画面長辺まで縮小した低解像度キャッシュが混在するため、v2 へ移行する。
         String key = it.path + "|" + it.size + "|" + it.modified + "|v2|" + px;
@@ -42,13 +42,14 @@ final class ViewCache {
 
     /** 旧形式v1の全画面キャッシュを削除する。v2 とは名前が違うため並行生成してよい。 */
     private static void deleteLegacyCache() {
-        File d = ThumbCache.dir();
-        File[] fs = d == null ? null : d.listFiles();
-        if (fs == null) return;
-        for (File f : fs) {
-            String name = f.getName();
-            // v1 は "v" + 40桁のSHA-1 + ".jpg"。先頭が v2 の旧ファイルも確実に削除する。
-            if (name.matches("v[0-9a-f]{40}\\.jpg")) f.delete();
+        for (File d : new File[]{ThumbCache.fullDir(), ThumbCache.dir()}) {
+            File[] fs = d == null ? null : d.listFiles();
+            if (fs == null) continue;
+            for (File f : fs) {
+                String name = f.getName();
+                // v1 は "v" + 40桁のSHA-1 + ".jpg"。先頭が v2 の旧ファイルも確実に削除する。
+                if (name.matches("v[0-9a-f]{40}\\.jpg")) f.delete();
+            }
         }
     }
 

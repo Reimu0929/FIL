@@ -14,7 +14,6 @@ import android.view.View;
 import android.view.ViewGroup;
 import android.widget.AbsListView;
 import android.widget.BaseAdapter;
-import android.widget.Button;
 import android.widget.GridView;
 import android.widget.ImageView;
 import android.widget.LinearLayout;
@@ -42,7 +41,7 @@ public class GridActivity extends Activity {
     private boolean showCount;
     private GridView grid;
     private BaseAdapter adapter;
-    private Button sizeBtn;
+    private MenuItem sizeItem;
     private TextView stat;
 
     private final Runnable statTick = new Runnable() {
@@ -80,13 +79,7 @@ public class GridActivity extends Activity {
         texts.addView(sub);
         texts.addView(stat);
         head.addView(texts, new LinearLayout.LayoutParams(0, -2, 1f));
-        sizeBtn = new Button(this);
-        sizeBtn.setOnClickListener(v -> {
-            tier = (tier + 1) % ThumbCache.TIER_PX.length;
-            ThumbCache.setTier(this, tier);
-            applySize();
-        });
-        head.addView(sizeBtn, new LinearLayout.LayoutParams(-2, -2));
+        // 「サイズ」ボタンは 3ドットの左のアクションバーへ移動した。
         root.addView(head, new LinearLayout.LayoutParams(-1, -2));
 
         grid = new GridView(this);
@@ -175,13 +168,22 @@ public class GridActivity extends Activity {
     }
 
     @Override public boolean onCreateOptionsMenu(Menu menu) {
+        sizeItem = menu.add(0, 2, 0, "サイズ: " + ThumbCache.TIER_NAME[tier]);
+        sizeItem.setShowAsAction(MenuItem.SHOW_AS_ACTION_IF_ROOM);  // 3ドットの左に表示
         menu.add(0, 1, 0, "設定").setShowAsAction(MenuItem.SHOW_AS_ACTION_NEVER);
         return true;
     }
 
     @Override public boolean onOptionsItemSelected(MenuItem item) {
-        if (item.getItemId() == 1) {
+        int id = item.getItemId();
+        if (id == 1) {
             startActivity(new Intent(this, SettingsActivity.class));
+            return true;
+        }
+        if (id == 2) {
+            tier = (tier + 1) % ThumbCache.TIER_PX.length;
+            ThumbCache.setTier(this, tier);
+            applySize();
             return true;
         }
         return super.onOptionsItemSelected(item);
@@ -189,7 +191,7 @@ public class GridActivity extends Activity {
 
     private void applySize() {
         grid.setColumnWidth(dp(ThumbCache.TIER_DP[tier]));
-        sizeBtn.setText("サイズ: " + ThumbCache.TIER_NAME[tier]);
+        if (sizeItem != null) sizeItem.setTitle("サイズ: " + ThumbCache.TIER_NAME[tier]);
         lastFirst = -1;
         adapter.notifyDataSetChanged();
         grid.requestLayout();
