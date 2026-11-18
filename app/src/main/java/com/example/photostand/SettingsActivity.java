@@ -4,6 +4,7 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.graphics.Color;
 import android.os.Bundle;
+import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
 import android.view.View;
@@ -24,25 +25,28 @@ public class SettingsActivity extends Activity {
             "左右10枚", "左右20枚", "左右30枚", "左右50枚", "左右100枚"};
     private static final int[] PRELOAD_ALL = {0, 1, 2};
     private static final String[] PRELOAD_ALL_LABELS = {
-            "オフ(開いた写真の前後だけ先読み)",
-            "起動時に全フォルダを先読み",
-            "フォルダを開いたときにそのフォルダを先読み"};
+            "自動生成しない(表示時に必要なものだけ作成)",
+            "アプリ起動時に未作成分を生成(全フォルダ)",
+            "フォルダを開いたときに未作成分を生成(そのフォルダ)"};
     private static final float[] PAGES = {0f, 0.5f, 1f, 1.5f, 2f, 2.5f, 3f, 5f};
     private static final String[] PAGE_LABELS = {
             "なし", "半ページ分", "1ページ分", "1.5ページ分",
             "2ページ分", "2ページ半", "3ページ分", "5ページ分"};
 
     private final Handler h = new Handler(Looper.getMainLooper());
-    private TextView cacheInfo, jobStatus, preloadStatus, limitV, preloadV, pagesV, preloadAllV;
+    private TextView cacheInfo, memoryInfo, jobStatus, preloadStatus;
+    private TextView limitV, preloadV, pagesV, preloadAllV;
     private Button jobBtn, preloadBtn;
-    private int pollCount;
+    private Switch regenerate;
+    private int pollCount, memoryTick;
+    private volatile boolean infoRunning;
 
     private final Runnable poll = new Runnable() {
         @Override public void run() {
-            jobStatus.setText("サムネイル: " + CacheJob.status());
-            jobBtn.setText(CacheJob.running ? "生成を停止" : "全キャッシュを生成(大・中・小 / 全フォルダ)");
-            preloadStatus.setText("全画面: " + ViewPreloader.status());
-            preloadBtn.setText(ViewPreloader.running ? "先読みを停止" : "全画面用キャッシュを生成(全フォルダ)");
+            updateJobButtons();
+            jobStatus.setText(CacheJob.status());
+            preloadStatus.setText(ViewPreloader.status());
+            if (++memoryTick % 4 == 0) updateMemoryInfo();
             boolean busy = CacheJob.running || ViewPreloader.running;
             if (busy) {
                 getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
@@ -70,36 +74,19 @@ public class SettingsActivity extends Activity {
         root.setPadding(dp(20), dp(8), dp(20), dp(24));
         sv.addView(root);
 
-        section(root, "サムネイルのキャッシュ");
+        section(root, "ディスクキャッシュの状況");
         cacheInfo = new TextView(this);
         cacheInfo.setTextSize(15);
         cacheInfo.setPadding(0, dp(8), 0, dp(8));
         root.addView(cacheInfo);
 
-        jobBtn = new Button(this);
-        jobBtn.setOnClickListener(v -> {
-            if (CacheJob.running) CacheJob.stop();
-            else CacheJob.start(this);
-        });
-        root.addView(jobBtn);
-        jobStatus = new TextView(this);
-        jobStatus.setTextSize(14);
-        jobStatus.setTextColor(Color.GRAY);
-        jobStatus.setPadding(0, dp(4), 0, dp(8));
-        root.addView(jobStatus);
+        section(root, "RAM使用量");
+        memoryInfo = new TextView(this);
+        memoryInfo.setTextSize(15);
+        memoryInfo.setPadding(0, dp(8), 0, dp(8));
+        root.addView(memoryInfo);
 
-        Button clear = new Button(this);
-        clear.setText("キャッシュをすべて削除");
-        clear.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setMessage("保存したサムネイルと全画面用キャッシュをすべて削除します。写真は消えません。")
-                .setPositiveButton("削除", (d, w) -> new Thread(() -> {
-                    ThumbCache.clearDisk();
-                    h.post(this::refreshInfo);
-                }).start())
-                .setNegativeButton("キャンセル", null).show());
-        root.addView(clear);
-
-        limitV = row(root, "キャッシュサイズの上限", v -> choose("キャッシュサイズの上限", LIMIT_LABELS,
+        limitV = row(root, "ディスクキャッシュの上限(合計)", v -> choose("ディスクキャッシュの上限(合計)", LIMIT_LABELS,
                 indexOf(LIMITS, Prefs.limitMb(this)), i -> {
                     Prefs.sp(this).edit().putInt("limitMb", LIMITS[i]).apply();
                     showValues();
@@ -109,8 +96,57 @@ public class SettingsActivity extends Activity {
                     }).start();
                 }));
 
-        section(root, "全画面用の先読み");
-        preloadAllV = row(root, "先読みのタイミング", v -> choose("先読みのタイミング", PRELOAD_ALL_LABELS,
+        Button clear = new Button(this);
+        clear.setText("ディスクキャッシュをすべて削除");
+        clear.setOnClickListener(v -> {
+            if (CacheJob.running || ViewPreloader.running) {
+                new AlertDialog.Builder(this)
+                        .setMessage("キャッシュ生成を停止してから削除してください。")
+                        .setPositiveButton("OK", null).show();
+                return;
+            }
+            new AlertDialog.Builder(this)
+                    .setMessage("保存したサムネイルと全画面用キャッシュをすべて削除します。写真は消えません。")
+                    .setPositiveButton("削除", (d, w) -> new Thread(() -> {
+                        ThumbCache.clearDisk();
+                        h.post(this::refreshInfo);
+                    }).start())
+                    .setNegativeButton("キャンセル", null).show();
+        });
+        root.addView(clear);
+
+        section(root, "手動でキャッシュを生成");
+        regenerate = new Switch(this);
+        regenerate.setText("キャッシュ済みの写真も再生成する");
+        regenerate.setTextSize(18);
+        regenerate.setPadding(0, dp(12), 0, dp(4));
+        regenerate.setChecked(Prefs.regenerateAll(this));
+        regenerate.setOnCheckedChangeListener((b, on) -> {
+            Prefs.sp(this).edit().putBoolean("regenerateAll", on).apply();
+            updateJobButtons();
+        });
+        root.addView(regenerate);
+        TextView generationNote = new TextView(this);
+        generationNote.setText("オフ: 未作成のキャッシュだけを生成\nオン: キャッシュ済みも含めて全件再生成");
+        generationNote.setTextSize(14);
+        generationNote.setTextColor(Color.GRAY);
+        generationNote.setPadding(0, 0, 0, dp(8));
+        root.addView(generationNote);
+
+        jobBtn = new Button(this);
+        jobBtn.setOnClickListener(v -> {
+            if (CacheJob.running) CacheJob.stop();
+            else CacheJob.start(this, Prefs.regenerateAll(this));
+        });
+        root.addView(jobBtn);
+        jobStatus = new TextView(this);
+        jobStatus.setTextSize(14);
+        jobStatus.setTextColor(Color.GRAY);
+        jobStatus.setPadding(0, dp(4), 0, dp(8));
+        root.addView(jobStatus);
+
+        section(root, "全画面用ディスクキャッシュ");
+        preloadAllV = row(root, "自動生成のタイミング", v -> choose("自動生成のタイミング", PRELOAD_ALL_LABELS,
                 indexOf(PRELOAD_ALL, Prefs.preloadAll(this)), i -> {
                     Prefs.setPreloadAll(this, PRELOAD_ALL[i]);
                     showValues();
@@ -119,7 +155,7 @@ public class SettingsActivity extends Activity {
         preloadBtn = new Button(this);
         preloadBtn.setOnClickListener(v -> {
             if (ViewPreloader.running) ViewPreloader.stop();
-            else ViewPreloader.startAll(this);
+            else ViewPreloader.startAll(this, Prefs.regenerateAll(this));
         });
         root.addView(preloadBtn);
         preloadStatus = new TextView(this);
@@ -128,20 +164,20 @@ public class SettingsActivity extends Activity {
         preloadStatus.setPadding(0, dp(4), 0, dp(8));
         root.addView(preloadStatus);
 
-        section(root, "表示と先読み");
-        preloadV = row(root, "全画面の先読み枚数", v -> choose("全画面の先読み枚数", PRELOAD_LABELS,
+        section(root, "表示時の先読み(RAM)");
+        preloadV = row(root, "全画面で先読みする前後の枚数", v -> choose("全画面で先読みする前後の枚数", PRELOAD_LABELS,
                 indexOf(PRELOADS, Prefs.preload(this)), i -> {
                     Prefs.sp(this).edit().putInt("preload", PRELOADS[i]).apply();
                     showValues();
                 }));
-        pagesV = row(root, "タイル画面の先読み量", v -> choose("タイル画面の先読み量", PAGE_LABELS,
+        pagesV = row(root, "タイルで先読みする画面外の範囲", v -> choose("タイルで先読みする画面外の範囲", PAGE_LABELS,
                 indexOf(PAGES, Prefs.pages(this)), i -> {
                     Prefs.sp(this).edit().putFloat("pages", PAGES[i]).apply();
                     showValues();
                 }));
 
         Switch sw = new Switch(this);
-        sw.setText("読み込み済みの枚数を画面に表示");
+        sw.setText("キャッシュ枚数とRAM使用量を写真画面に表示");
         sw.setTextSize(18);
         sw.setPadding(0, dp(16), 0, dp(16));
         sw.setChecked(Prefs.showCount(this));
@@ -162,6 +198,7 @@ public class SettingsActivity extends Activity {
     @Override protected void onResume() {
         super.onResume();
         refreshInfo();
+        updateMemoryInfo();
         h.post(poll);
     }
 
@@ -170,23 +207,54 @@ public class SettingsActivity extends Activity {
         super.onPause();
     }
 
+    private void updateJobButtons() {
+        if (jobBtn == null || preloadBtn == null || regenerate == null) return;
+        boolean all = regenerate.isChecked();
+        jobBtn.setText(CacheJob.running ? "生成を停止"
+                : all ? "サムネイルを全件再生成(全フォルダ)" : "未作成のサムネイルを生成(全フォルダ)");
+        preloadBtn.setText(ViewPreloader.running ? "生成を停止"
+                : all ? "全画面用キャッシュを全件再生成(全フォルダ)" : "未作成の全画面用キャッシュを生成(全フォルダ)");
+    }
+
     private void showValues() {
         limitV.setText(LIMIT_LABELS[indexOf(LIMITS, Prefs.limitMb(this))] + "(超えたら古いものから削除)");
         preloadV.setText(PRELOAD_LABELS[indexOf(PRELOADS, Prefs.preload(this))]
-                + "(最大 " + Prefs.PRELOAD_MAX + " 枚。増やすほどメモリを使います)");
+                + "(最大 " + Prefs.PRELOAD_MAX + " 枚。上限内でRAMに保持します)");
         pagesV.setText(PAGE_LABELS[indexOf(PAGES, Prefs.pages(this))] + "(画面の外のサムネイルを先に作ります)");
         preloadAllV.setText(PRELOAD_ALL_LABELS[indexOf(PRELOAD_ALL, Prefs.preloadAll(this))]);
     }
 
-    /** キャッシュフォルダの大きさを数えて表示する(裏のスレッドで数える)。 */
+    /** キャッシュフォルダの大きさと種類別のファイル数を裏のスレッドで数える。 */
     private void refreshInfo() {
+        if (infoRunning) return;
+        infoRunning = true;
         new Thread(() -> {
-            long[] st = ThumbCache.diskStats();
-            String text = "保存先: " + ThumbCache.where
-                    + "\nサイズ: " + String.format("%.1f MB", st[0] / 1048576.0)
-                    + "(" + st[1] + " ファイル)";
-            h.post(() -> cacheInfo.setText(text));
+            try {
+                ThumbCache.DiskStats st = ThumbCache.diskStats();
+                String text = "保存先: " + ThumbCache.where
+                        + "\nサムネイル: " + st.thumbFiles + " ファイル / " + mb(st.thumbBytes)
+                        + "\n  (1枚の写真につき小・中・大の最大3ファイル)"
+                        + "\n全画面用: " + st.viewFiles + " ファイル / " + mb(st.viewBytes)
+                        + "\n合計: " + st.totalFiles() + " ファイル / " + mb(st.totalBytes());
+                h.post(() -> cacheInfo.setText(text));
+            } finally {
+                infoRunning = false;
+            }
         }).start();
+    }
+
+    private void updateMemoryInfo() {
+        if (memoryInfo == null) return;
+        Debug.MemoryInfo mi = new Debug.MemoryInfo();
+        Debug.getMemoryInfo(mi);
+        long appBytes = mi.getTotalPss() * 1024L;
+        memoryInfo.setText("アプリ全体(概算・全画面用も含む): " + mb(appBytes)
+                + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
+                + mb(ThumbCache.memBytes()));
+    }
+
+    private static String mb(long bytes) {
+        return String.format("%.1f MB", bytes / 1048576.0);
     }
 
     private String versionName() {

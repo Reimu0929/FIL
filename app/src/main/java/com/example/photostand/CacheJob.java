@@ -16,7 +16,7 @@ final class CacheJob {
     static volatile long startMs;
     static final AtomicInteger done = new AtomicInteger();
 
-    static synchronized void start(Context ctx) {
+    static synchronized void start(Context ctx, final boolean regenerateAll) {
         if (running) return;
         running = true;
         cancel = false;
@@ -29,7 +29,7 @@ final class CacheJob {
             try {
                 final ArrayList<Photos.Item> all = Photos.loadAll(cr);
                 total = all.size();
-                message = "生成中";
+                message = regenerateAll ? "サムネイルを再生成中" : "未作成のサムネイルを生成中";
                 final AtomicInteger next = new AtomicInteger();
                 Thread[] ws = new Thread[2];
                 for (int i = 0; i < ws.length; i++) {
@@ -39,7 +39,7 @@ final class CacheJob {
                             int n = next.getAndIncrement();
                             if (n >= all.size()) break;
                             try {
-                                ThumbCache.ensureAll(all.get(n));
+                                ThumbCache.ensureAll(all.get(n), regenerateAll);
                             } catch (Throwable ignored) {
                             }
                             done.incrementAndGet();

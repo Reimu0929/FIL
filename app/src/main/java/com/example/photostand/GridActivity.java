@@ -45,7 +45,8 @@ public class GridActivity extends Activity {
 
     private final Runnable statTick = new Runnable() {
         @Override public void run() {
-            stat.setText("メモリ内のサムネイル: " + ThumbCache.memCount() + " 枚");
+            stat.setText("サムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
+                    + String.format("%.1f MB", ThumbCache.memBytes() / 1048576.0));
             h.postDelayed(this, 700);
         }
     };

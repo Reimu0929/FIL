@@ -94,7 +94,7 @@ public class MainActivity extends Activity {
         }
     }
 
-    /** 設定が「起動時に全フォルダを先読み」なら、起動後に一度だけ全画面用キャッシュを作る。 */
+    /** 設定が「アプリ起動時」なら、起動後に一度だけ全画面用ディスクキャッシュを作る。 */
     private void maybeStartupPreload() {
         if (Prefs.preloadAll(this) == 1) ViewPreloader.startAllOnce(this);
     }

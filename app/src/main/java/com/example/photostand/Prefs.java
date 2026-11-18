@@ -28,11 +28,14 @@ final class Prefs {
     /** タイル画面で先読みする量(ページ数) */
     static float pages(Context c) { return sp(c).getFloat("pages", 1f); }
 
-    /** 読み込み済みの枚数を画面に出すか */
+    /** メモリ内キャッシュの枚数とRAM使用量を画面に出すか */
     static boolean showCount(Context c) { return sp(c).getBoolean("showCount", false); }
 
+    /** 手動生成で、キャッシュ済みの写真も作り直すか。オフなら未作成のものだけを作る。 */
+    static boolean regenerateAll(Context c) { return sp(c).getBoolean("regenerateAll", false); }
+
     /**
-     * 全画面用キャッシュの一括先読み。
+     * 全画面用ディスクキャッシュの自動生成。
      * 0 = オフ、1 = 起動時に全フォルダ、2 = フォルダを開いたとき
      */
     static int preloadAll(Context c) {

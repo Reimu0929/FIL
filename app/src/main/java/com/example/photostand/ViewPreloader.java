@@ -7,8 +7,8 @@ import java.util.ArrayList;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
- * 全画面表示用キャッシュをまとめて作る処理。
- * 起動時に全フォルダ、またはフォルダを開いたときに、そのフォルダぶんを先読みする。
+ * 全画面表示用ディスクキャッシュをまとめて作る処理。
+ * 起動時に全フォルダ、またはフォルダを開いたときに、そのフォルダぶんを生成する。
  */
 final class ViewPreloader {
     private ViewPreloader() {}
@@ -16,7 +16,7 @@ final class ViewPreloader {
     static volatile boolean running;
     static volatile boolean cancel;
     static volatile int total;
-    static volatile int done;
+    static final AtomicInteger done = new AtomicInteger();
     static volatile String message = "未実行";
     private static volatile long startMs;
     private static boolean startupStarted;
@@ -26,29 +26,29 @@ final class ViewPreloader {
         return Math.max(dm.widthPixels, dm.heightPixels);
     }
 
-    /** 起動時の先読み。アプリを起動している間は1回だけ実行する。 */
+    /** 起動時の自動生成。アプリを起動している間は1回だけ実行する。 */
     static synchronized void startAllOnce(Context ctx) {
         if (startupStarted || running) return;
         startupStarted = true;
-        start(ctx, null);
+        start(ctx, null, false);
     }
 
-    /** 指定フォルダ(全画面に出す写真)の先読み。 */
+    /** 指定フォルダの未作成キャッシュを自動生成する。 */
     static void startFolder(Context ctx, String bucket) {
-        start(ctx, bucket);
+        start(ctx, bucket, false);
     }
 
-    /** 手動で全フォルダの先読みを開始する。 */
-    static void startAll(Context ctx) {
-        start(ctx, null);
+    /** 手動で全フォルダのキャッシュを生成する。 */
+    static void startAll(Context ctx, boolean regenerateAll) {
+        start(ctx, null, regenerateAll);
     }
 
-    private static synchronized void start(Context ctx, String bucket) {
+    private static synchronized void start(Context ctx, String bucket, final boolean regenerateAll) {
         if (running) return;
         running = true;
         cancel = false;
         total = 0;
-        done = 0;
+        done.set(0);
         startMs = System.currentTimeMillis();
         message = "写真の一覧を取得中";
         final ContentResolver cr = ctx.getApplicationContext().getContentResolver();
@@ -59,7 +59,7 @@ final class ViewPreloader {
                         ? Photos.loadAll(cr)
                         : Photos.load(cr, bucket);
                 total = all.size();
-                message = "全画面用キャッシュを生成中";
+                message = regenerateAll ? "全画面用キャッシュを再生成中" : "未作成の全画面用キャッシュを生成中";
                 final AtomicInteger next = new AtomicInteger();
                 Thread[] ws = new Thread[2];
                 for (int i = 0; i < ws.length; i++) {
@@ -69,10 +69,10 @@ final class ViewPreloader {
                             int n = next.getAndIncrement();
                             if (n >= all.size()) break;
                             try {
-                                ViewCache.ensure(all.get(n), px);
+                                ViewCache.ensure(all.get(n), px, regenerateAll);
                             } catch (Throwable ignored) {
                             }
-                            done++;
+                            done.incrementAndGet();
                         }
                     });
                     ws[i].start();
@@ -93,10 +93,9 @@ final class ViewPreloader {
     }
 
     static String status() {
-        if (running) {
-            return message + ": " + done + " / " + total + " 枚(経過 " + elapsed() + ")";
-        }
-        if (total > 0) return message + ": " + done + " / " + total + " 枚";
+        int t = total, d = done.get();
+        if (running) return message + ": " + d + " / " + t + " 枚処理済み(経過 " + elapsed() + ")";
+        if (t > 0) return message + ": " + d + " / " + t + " 枚処理済み";
         return message;
     }
 

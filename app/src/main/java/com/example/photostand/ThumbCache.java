@@ -5,12 +5,15 @@ import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.os.Environment;
+import android.system.Os;
 import android.util.LruCache;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
+import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.UUID;
 
 /**
  * サムネイルのキャッシュ。メモリ(アプリ全体で共有)とディスクの2段構え。
@@ -88,6 +91,11 @@ final class ThumbCache {
         return mem == null ? 0 : mem.snapshot().size();
     }
 
+    /** メモリ内のサムネイルが占めるバイト数。 */
+    static int memBytes() {
+        return mem == null ? 0 : mem.size();
+    }
+
     /** メモリ → ディスク → 新規作成の順に探す(裏のスレッドから呼ぶこと)。 */
     static Bitmap get(Photos.Item it, int px) {
         String k = memKey(it, px);
@@ -115,10 +123,15 @@ final class ThumbCache {
      * 一番大きいサイズで1回だけ読み込み、そこから小さいサイズを作るので速い。
      */
     static void ensureAll(Photos.Item it) {
+        ensureAll(it, false);
+    }
+
+    /** 未作成のものだけ、または regenerateAll が true なら全サイズを作り直す。 */
+    static void ensureAll(Photos.Item it, boolean regenerateAll) {
         boolean[] need = new boolean[TIER_PX.length];
         int top = -1;
         for (int t = 0; t < TIER_PX.length; t++) {
-            need[t] = !fileFor(it, TIER_PX[t]).exists();
+            need[t] = regenerateAll || !fileFor(it, TIER_PX[t]).exists();
             if (need[t]) top = t;
         }
         if (top < 0) return;
@@ -134,14 +147,21 @@ final class ThumbCache {
     }
 
     private static void write(File f, Bitmap b) {
-        File tmp = new File(dir, f.getName() + ".tmp");
+        File tmp = new File(dir, f.getName() + "." + UUID.randomUUID() + ".tmp");
         try (FileOutputStream o = new FileOutputStream(tmp)) {
-            b.compress(Bitmap.CompressFormat.JPEG, 85, o);
+            if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
+                throw new java.io.IOException("JPEG compression failed");
+            }
         } catch (Exception e) {
             tmp.delete();
             return;
         }
-        if (!tmp.renameTo(f)) tmp.delete();
+        try {
+            // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
+            Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
+        } catch (Exception e) {
+            tmp.delete();
+        }
     }
 
     /** 短辺が px の tol 倍を超えていたら、短辺 px に縮小して返す(元の画像は壊さない)。 */
@@ -191,17 +211,31 @@ final class ThumbCache {
         }
     }
 
-    /** ディスクのキャッシュ: {合計バイト数, ファイル数}。 */
-    static long[] diskStats() {
-        long bytes = 0, count = 0;
+    /** 完成したJPEGだけを数えたディスクキャッシュの内訳。 */
+    static final class DiskStats {
+        long thumbBytes, viewBytes;
+        int thumbFiles, viewFiles;
+
+        long totalBytes() { return thumbBytes + viewBytes; }
+        int totalFiles() { return thumbFiles + viewFiles; }
+    }
+
+    static DiskStats diskStats() {
+        DiskStats st = new DiskStats();
         File[] fs = dir == null ? null : dir.listFiles();
         if (fs != null) {
             for (File f : fs) {
-                bytes += f.length();
-                count++;
+                if (!f.isFile() || !f.getName().endsWith(".jpg")) continue;
+                if (f.getName().startsWith("v")) {
+                    st.viewBytes += f.length();
+                    st.viewFiles++;
+                } else {
+                    st.thumbBytes += f.length();
+                    st.thumbFiles++;
+                }
             }
         }
-        return new long[]{bytes, count};
+        return st;
     }
 
     /** ディスクとメモリのキャッシュをすべて消す。 */
@@ -211,15 +245,22 @@ final class ThumbCache {
         if (mem != null) mem.evictAll();
     }
 
-    /** 上限を超えていたら、古いものから消して上限の8割にする。 */
-    static void pruneNow() {
+    /** 上限を超えていたら、古い完成済みキャッシュから消して上限の8割にする。 */
+    static synchronized void pruneNow() {
         try {
-            File[] fs = dir == null ? null : dir.listFiles();
-            if (fs == null) return;
+            File[] all = dir == null ? null : dir.listFiles();
+            if (all == null) return;
             long limit = Prefs.limitMb(app) * 1024L * 1024L;
             long keep = limit / 5 * 4;
             long total = 0;
-            for (File f : fs) total += f.length();
+            ArrayList<File> complete = new ArrayList<>();
+            for (File f : all) {
+                // 書き込み中の .tmp を消すとキャッシュ生成が失敗するため、完成したJPEGだけを扱う。
+                if (!f.isFile() || !f.getName().endsWith(".jpg")) continue;
+                complete.add(f);
+                total += f.length();
+            }
+            File[] fs = complete.toArray(new File[0]);
             if (total <= limit) return;
             Arrays.sort(fs, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
             for (File f : fs) {

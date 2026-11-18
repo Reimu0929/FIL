@@ -4,8 +4,10 @@ import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
+import android.system.Os;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.UUID;
 
 /**
  * 全画面表示用のディスクキャッシュ。画面サイズに縮小した JPEG を
@@ -45,8 +47,13 @@ final class ViewCache {
 
     /** まだ無ければディスクに作る(メモリには残さない)。 */
     static void ensure(Photos.Item it, int px) {
+        ensure(it, px, false);
+    }
+
+    /** 未作成のものだけ、または regenerateAll が true なら全件をディスクに作る。 */
+    static void ensure(Photos.Item it, int px, boolean regenerateAll) {
         File f = fileFor(it, px);
-        if (f == null || f.exists()) return;
+        if (f == null || (!regenerateAll && f.exists())) return;
         Bitmap b = generate(it, px);
         if (b == null) return;
         write(f, b);
@@ -73,6 +80,16 @@ final class ViewCache {
                 if (r != b) b.recycle();
                 b = r;
             }
+            // inSampleSize だけでは画面長辺の約2倍が残ることがあるため、必ず画面サイズまで縮小する。
+            int decodedBig = Math.max(b.getWidth(), b.getHeight());
+            if (decodedBig > px) {
+                float scale = (float) px / decodedBig;
+                Bitmap r = Bitmap.createScaledBitmap(b,
+                        Math.max(1, Math.round(b.getWidth() * scale)),
+                        Math.max(1, Math.round(b.getHeight() * scale)), true);
+                if (r != b) b.recycle();
+                b = r;
+            }
             return b;
         } catch (Throwable t) {
             return null;
@@ -83,13 +100,20 @@ final class ViewCache {
         if (f == null) return;
         File parent = f.getParentFile();
         if (parent != null) parent.mkdirs();
-        File tmp = new File(parent, f.getName() + ".tmp");
+        File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
         try (FileOutputStream o = new FileOutputStream(tmp)) {
-            b.compress(Bitmap.CompressFormat.JPEG, 85, o);
+            if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
+                throw new java.io.IOException("JPEG compression failed");
+            }
         } catch (Exception e) {
             tmp.delete();
             return;
         }
-        if (!tmp.renameTo(f)) tmp.delete();
+        try {
+            // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
+            Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
+        } catch (Exception e) {
+            tmp.delete();
+        }
     }
 }

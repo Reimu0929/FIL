@@ -213,7 +213,9 @@ public class ViewerActivity extends Activity {
 
     private void updateStat() {
         if (!showCount) return;
-        stat.setText("読み込み済み " + cache.snapshot().size() + " 枚(先読み: 左右" + preload + "枚)");
+        stat.setText("全画面のRAMキャッシュ: " + cache.snapshot().size() + " 枚 / "
+                + String.format("%.1f MB", cache.size() / 1048576.0)
+                + "\n先読み範囲: 左右" + preload + "枚");
     }
 
     /** 拡大し始めたら、より細かい画像を読み込んで差し替える。 */
