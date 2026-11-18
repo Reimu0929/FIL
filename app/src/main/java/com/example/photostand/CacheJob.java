@@ -30,24 +30,8 @@ final class CacheJob {
                 final ArrayList<Photos.Item> all = Photos.loadAll(cr);
                 total = all.size();
                 message = regenerateAll ? "サムネイルを再生成中" : "未作成のサムネイルを生成中";
-                final AtomicInteger next = new AtomicInteger();
-                Thread[] ws = new Thread[2];
-                for (int i = 0; i < ws.length; i++) {
-                    ws[i] = new Thread(() -> {
-                        for (;;) {
-                            if (cancel) break;
-                            int n = next.getAndIncrement();
-                            if (n >= all.size()) break;
-                            try {
-                                ThumbCache.ensureAll(all.get(n), regenerateAll);
-                            } catch (Throwable ignored) {
-                            }
-                            done.incrementAndGet();
-                        }
-                    });
-                    ws[i].start();
-                }
-                for (Thread w : ws) w.join();
+                Jobs.runWorkers(all, new AtomicInteger(), done, () -> cancel,
+                        it -> ThumbCache.ensureAll(it, regenerateAll));
                 message = cancel ? "停止しました" : "完了";
             } catch (Throwable t) {
                 message = "エラーで中断しました";
@@ -63,14 +47,6 @@ final class CacheJob {
     }
 
     static String status() {
-        int t = total, d = done.get();
-        if (running) return message + ": " + d + " / " + t + " 枚(経過 " + elapsed() + ")";
-        if (t > 0) return message + ": " + d + " / " + t + " 枚";
-        return message;
-    }
-
-    private static String elapsed() {
-        long s = (System.currentTimeMillis() - startMs) / 1000;
-        return String.format("%d:%02d", s / 60, s % 60);
+        return Jobs.status(running, message, done.get(), total, startMs, "枚");
     }
 }

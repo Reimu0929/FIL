@@ -81,8 +81,6 @@ final class Photos {
                 int di = si, dj = sj;
                 while (i < la && digit(a.charAt(i))) i++;
                 while (j < lb && digit(b.charAt(j))) j++;
-                if (i < di) di = i;
-                if (j < dj) dj = j;
                 int lenA = i - di, lenB = j - dj;
                 if (lenA != lenB) return lenA < lenB ? -1 : 1;
                 for (int p = 0; p < lenA; p++) {

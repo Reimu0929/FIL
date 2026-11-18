@@ -31,7 +31,7 @@ public class GridActivity extends Activity {
     private final ExecutorService ex = Executors.newFixedThreadPool(3);     // 画面に見えている分
     private final ExecutorService exPre = Executors.newSingleThreadExecutor(); // 先読み
     private final ExecutorService exQuery = Executors.newSingleThreadExecutor(); // MediaStore クエリ
-    private final Set<Integer> queued = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
+    private final Set<String> queued = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private String bucket, name;
     private volatile int tier, lastFirst = -1;
@@ -215,14 +215,15 @@ public class GridActivity extends Activity {
         if (idx < 0 || idx >= total) return;
         final Photos.Item it = items.get(idx);
         if (ThumbCache.memGet(it, px) != null) return;
-        if (!queued.add(idx)) return;
+        final String key = idx + "|" + px;   // 段階切替直後に古いキーでブロックされないように
+        if (!queued.add(key)) return;
         exPre.execute(() -> {
             try {
                 if (idx < lo || idx > hi) return;                    // もう範囲外
                 if (px != ThumbCache.TIER_PX[tier]) return;          // サイズが変わった
                 ThumbCache.get(it, px);
             } finally {
-                queued.remove(idx);
+                queued.remove(key);
             }
         });
     }

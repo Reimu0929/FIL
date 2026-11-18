@@ -44,6 +44,10 @@ final class ThumbCache {
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
     private static final Set<String> allInFlight = ConcurrentHashMap.newKeySet();
     private static final char[] HEX = "0123456789abcdef".toCharArray();
+    /** ディスク書き込み・全削除・剪定を互斥するロック。 */
+    private static final Object diskLock = new Object();
+    private static volatile boolean clearing;
+    private static int writesSincePrune;
 
     static synchronized void init(Context ctx) {
         if (mem != null) return;
@@ -177,7 +181,7 @@ final class ThumbCache {
         b = generate(it, px);
         if (b != null) {
             memPut(k, b);
-            write(fileFor(it, px), b);
+            writeJpeg(fileFor(it, px), b);
         }
         return b;
     }
@@ -210,7 +214,7 @@ final class ThumbCache {
                 Bitmap b = (t == top) ? base : scaleShort(base, TIER_PX[t], 1f);
                 // 縮小されず上位段と同一内容になるファイルは作らない(読み出し時に最大段へフォールバック)。
                 if (b == base && t != top) continue;
-                write(fileFor(it, TIER_PX[t]), b);
+                writeJpeg(fileFor(it, TIER_PX[t]), b);
                 if (b != base) b.recycle();
             }
             base.recycle();
@@ -231,21 +235,37 @@ final class ThumbCache {
         }
     }
 
-    private static void write(File f, Bitmap b) {
-        File tmp = new File(f.getParentFile(), f.getName() + "." + UUID.randomUUID() + ".tmp");
-        try (FileOutputStream o = new FileOutputStream(tmp)) {
-            if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
-                throw new java.io.IOException("JPEG compression failed");
+    /** サムネイル/全画面どちらもここで書き込む。全削除と競合しないよう diskLock で互斥する。 */
+    static void writeJpeg(File f, Bitmap b) {
+        synchronized (diskLock) {
+            if (clearing) return;
+            File parent = f.getParentFile();
+            if (parent != null) parent.mkdirs();
+            File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
+            try (FileOutputStream o = new FileOutputStream(tmp)) {
+                if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
+                    throw new java.io.IOException("JPEG compression failed");
+                }
+            } catch (Exception e) {
+                tmp.delete();
+                return;
             }
-        } catch (Exception e) {
-            tmp.delete();
-            return;
-        }
-        try {
-            // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
-            Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
-        } catch (Exception e) {
-            tmp.delete();
+            if (clearing) {
+                tmp.delete();
+                return;
+            }
+            try {
+                // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
+                Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
+            } catch (Exception e) {
+                tmp.delete();
+                return;
+            }
+            // 閲覧だけのセッションでも上限が効くよう、一定回数ごとに剪定する。
+            if (++writesSincePrune >= 16) {
+                writesSincePrune = 0;
+                pruneInternal();
+            }
         }
     }
 
@@ -260,12 +280,19 @@ final class ThumbCache {
     }
 
     private static Bitmap generate(Photos.Item it, int px) {
+        return decodeScaled(it, px, true, 1.2f);
+    }
+
+    /** サムネイル/全画面どちらも使う元画像デコード。byShortSide と shrinkTol で挙動を変える。 */
+    static Bitmap decodeScaled(Photos.Item it, int px, boolean byShortSide, float shrinkTol) {
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(it.path, o);
+            int base = byShortSide ? Math.min(o.outWidth, o.outHeight) : Math.max(o.outWidth, o.outHeight);
+            if (base <= 0) return null;
             int s = 1;
-            while (Math.min(o.outWidth, o.outHeight) / (s * 2) >= px) s *= 2;
+            while (base / (s * 2) >= px) s *= 2;
             o.inJustDecodeBounds = false;
             o.inSampleSize = s;
             Bitmap b = BitmapFactory.decodeFile(it.path, o);
@@ -277,9 +304,12 @@ final class ThumbCache {
                 if (r != b) b.recycle();
                 b = r;
             }
-            Bitmap r = scaleShort(b, px, 1.2f);
-            if (r != b) b.recycle();
-            return r;
+            if (shrinkTol > 0) {
+                Bitmap r = scaleShort(b, px, shrinkTol);
+                if (r != b) b.recycle();
+                b = r;
+            }
+            return b;
         } catch (Throwable t) {
             return null;
         }
@@ -338,9 +368,16 @@ final class ThumbCache {
         return st;
     }
 
-    /** ディスクとメモリのキャッシュをすべて消す。 */
+    /** ディスクとメモリのキャッシュをすべて消す(裏書き込みと競合しない)。 */
     static void clearDisk() {
-        for (File f : allFiles(false)) f.delete();
+        synchronized (diskLock) {
+            clearing = true;
+            try {
+                for (File f : allFiles(false)) f.delete();
+            } finally {
+                clearing = false;
+            }
+        }
         if (mem != null) mem.evictAll();
     }
 
@@ -354,24 +391,25 @@ final class ThumbCache {
     }
 
     /** 上限を超えていたら、両フォルダの古い完成済みキャッシュから消して上限の8割にする。 */
-    static synchronized void pruneNow() {
+    static void pruneNow() {
+        synchronized (diskLock) {
+            pruneInternal();
+        }
+    }
+
+    /** diskLock 保持中にだけ呼ぶ。 */
+    private static void pruneInternal() {
         try {
             deleteStaleTemp();
-            File[] all = allFiles(true);
+            File[] all = allFiles(true);   // 完成済み .jpg のみ(書き込み中の .tmp は触らない)
             if (all.length == 0) return;
             long limit = Prefs.limitMb(app) * 1024L * 1024L;
             long keep = limit / 5 * 4;
             long total = 0;
-            ArrayList<File> complete = new ArrayList<>();
-            for (File f : all) {
-                // 書き込み中の .tmp を消すとキャッシュ生成が失敗するため、完成したJPEGだけを扱う。
-                complete.add(f);
-                total += f.length();
-            }
-            File[] fs = complete.toArray(new File[0]);
+            for (File f : all) total += f.length();
             if (total <= limit) return;
-            Arrays.sort(fs, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
-            for (File f : fs) {
+            Arrays.sort(all, (a, b) -> Long.compare(a.lastModified(), b.lastModified()));
+            for (File f : all) {
                 if (total <= keep) break;
                 long len = f.length();
                 if (f.delete()) total -= len;

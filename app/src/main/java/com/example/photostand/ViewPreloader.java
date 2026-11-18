@@ -68,24 +68,8 @@ final class ViewPreloader {
                         : Photos.load(cr, bucket);
                 total = all.size();
                 message = regenerateAll ? "全画面用キャッシュを再生成中" : "未作成の全画面用キャッシュを生成中";
-                final AtomicInteger next = new AtomicInteger();
-                Thread[] ws = new Thread[2];
-                for (int i = 0; i < ws.length; i++) {
-                    ws[i] = new Thread(() -> {
-                        for (;;) {
-                            if (cancel) break;
-                            int n = next.getAndIncrement();
-                            if (n >= all.size()) break;
-                            try {
-                                ViewCache.ensure(all.get(n), px, regenerateAll);
-                            } catch (Throwable ignored) {
-                            }
-                            done.incrementAndGet();
-                        }
-                    });
-                    ws[i].start();
-                }
-                for (Thread w : ws) w.join();
+                Jobs.runWorkers(all, new AtomicInteger(), done, () -> cancel,
+                        it -> ViewCache.ensure(it, px, regenerateAll));
                 message = cancel ? "停止しました" : "完了";
             } catch (Throwable t) {
                 message = "エラーで中断しました";
@@ -110,14 +94,11 @@ final class ViewPreloader {
     }
 
     static String status() {
-        int t = total, d = done.get();
-        if (running) return message + ": " + d + " / " + t + " 枚処理済み(経過 " + elapsed() + ")";
-        if (t > 0) return message + ": " + d + " / " + t + " 枚処理済み";
-        return message;
-    }
-
-    private static String elapsed() {
-        long s = (System.currentTimeMillis() - startMs) / 1000;
-        return String.format("%d:%02d", s / 60, s % 60);
+        String pend;
+        synchronized (ViewPreloader.class) {
+            pend = pendingBucket;
+        }
+        String suffix = pend == null ? "" : " [保留: " + pend + "]";
+        return Jobs.status(running, message, done.get(), total, startMs, "枚処理済み") + suffix;
     }
 }

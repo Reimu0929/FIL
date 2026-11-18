@@ -86,3 +86,65 @@
 3. `loadHi` のexecutor分離
 4. single-flight化 + `natural()` のアロケーション削減
 5. 以下、軽微なもの
+
+---
+
+# 追加レビュー(2026-11-18・第2回 / 上記修正反映後のコードが対象)
+
+## 🔴 優先度: 高
+
+- [x] **起動直後にタップ/フリックするとクラッシュする(ゼロ除算・境界外アクセス)**
+  - `ViewerActivity.java:178-183` — `step()` の `int n = items.size(); ((index + d) % n + n) % n;`
+  - `items` は `loadItems()` の裏スレッド完了後に入るため、それ以前は `n == 0`。写真が多い端末では数秒のウィンドウがあり、左右1/3タップやフリック(`onNav → step`)で `ArithmeticException`
+  - 中央タップも `showInfo()`(`ViewerActivity.java:186`)で `items.get(index)` → `IndexOutOfBoundsException`
+  - 修正: `step()` と `showInfo()` の冒頭で `if (items.isEmpty()) return;`
+
+## 🟡 優先度: 中
+
+- [x] **ディスク上限が「閲覧だけ」の間は一切執行されない**
+  - `pruneNow()` は `ThumbCache.init` / CacheJob・ViewPreloader 完了時 / 上限変更時(`SettingsActivity.java:98-101`)にしか呼ばれない
+  - `preloadAll` = オフ/起動時で、ブラウズ中の `ViewCache.get` / `ThumbCache.get` の `loadOrCreate` 書き込みには prune フックが無く、上限超過のまま増え続ける
+  - 設定文言「超えたら古いものから削除」との食い違い。書き込み N 回ごと / `ViewerActivity.onDestroy` 等での実行を検討
+
+- [x] **「ディスクキャッシュをすべて削除」が背後の裏スレッド書き込みと競合する**
+  - `SettingsActivity.java:107-119` のガードは `CacheJob.running || ViewPreloader.running` のみ
+  - Settings を前面に出しても `GridActivity` の `ex`/`exPre`、生存中の `ViewerActivity` の `exCur`/`exPre` は停止せずキャッシュを書き続ける。削除直後にファイルが復活し、表示カウントも矛盾する
+  - 修正: 削除要求フラグを書き込み側へ渡す、または該当 executor を止める
+
+- [x] **設定画面の「全画面RAMの上限(maxMemory/2)」が実効上限と一致しない**
+  - `SettingsActivity.java:267-271` は cap を「上限」と表示するが、実効値は `ViewerActivity.ramLimitFor()`(`ViewerActivity.java:114-119`)の preload枚数×実測サイズ基準(最低16MB・cap=`maxMemory/2`)で通常はかなり小さい
+  - 全画面RAMの**実測使用量**は Settings に依然として無く、ビューアのオーバーレイ(`showCount`)でしか見えない(◪ の経緯にある残課題)
+
+## 🟢 優先度: 低(軽微・整理)
+
+- [x] **`ViewCache.ensure` と `ViewCache.get` で single-flight が分離している**
+  - `inFlight` と `ensureInFlight` が連動せず、ViewPreloader とビューアが同じ画像を二重デコード・二重書き込みする(原子 rename のため結果は壊れないが CPU/I/O の無駄)
+- [x] **v1 キャッシュ削除が二重に走る** — `ViewCache.deleteLegacyCache()`(`:44-54`)と `ThumbCache.migrateFullCache()`(`:84-98`)が両 init スレッドから同じ `v[0-9a-f]{40}\.jpg` を削除
+- [x] **重複コード** — `ViewCache.write()` / `ThumbCache.write()`(`:143-162` / `:234-250`)は実質同一、`generate()` もほぼ同一。`CacheJob` と `ViewPreloader` の worker/elapsed/status 構造もほぼコピー
+- [x] **`ThumbCache.pruneNow()` の `complete` ArrayList コピーが無意味** — `allFiles(true)` 時点で `.jpg` のみ(`complete.add(f)` のコメントも古い)
+- [x] **`Photos.natural()` のデッドコード** — `if (i < di) di = i;` / `if (j < dj) dj = j;`(`:84-85`)は `di = si ≤ i` が常に成り立つため発動しない
+- [x] **先読みカウント表示が RAM/ディスクの混算** — `ViewerActivity.java:303-306` の `preloaded` は `cache.get()!=null || ViewCache.has()`(`markPreloaded`)。「RAM n / ディスク m」のように分けて表示する方が実態に合う
+- [x] **先頭画像のデコード失敗時に黒画面のまま** — `ViewerActivity.java:213-217` は Toast のみ。仮サムネイルが残るため失敗が分かりにくい
+- [x] **`ViewPreloader.status()` が保留中のフォルダ要求を表示しない** — `pendingBucket` 設定中も前回の「完了: X / Y」のまま。一覧取得中は「0 / 0 枚処理済み」になる
+- [x] **`GridActivity.queue()` の重複排除キーが idx のみ**(`GridActivity.java:218`)— px を含まないためサイズ段階切替直後の prefetch が次回スクロールまで新しい段を準備しない(自己修復するので軽微)
+- [x] **初期RAM見積りが最大4倍過小** — `ViewerActivity.java:121-124` の `target²×4` に対し、デコード結果は長辺最大2倍。`noteBitmapSize()` ですぐ補正されるが最初の数枚だけ追い出しが早い
+- [x] **命名の不統一** — Manifest「フォトビューア」/ 設定フッター「PhotoViewer」(`SettingsActivity.java:196`)/ package `com.example.photostand`
+
+## ✅ 第2回で確認済み(修正不要)
+
+- 第1回のチェック項目はすべて反映済み(single-flight、exHi 分離、`.tmp` 掃除、非同期クエリ、`natural()` 高速化、sha1 hex 化、権限直後の二重 load 解消、snapshot カウンタ化、ポーリング間隔、`startFolder` の保留)
+- `ViewPreloader.startAllOnce()` は `running` でスキップした場合にフラグを立てないため、次回 `onResume` で再試行される(バグではない)
+- v1/v2 の正規表現、自然順ソートの境界ケース、`targetSdk 28` のレガシーストレージとしての動作は仕様どおり
+
+## ⚠️ 既知の残存課題(今回の範囲外)
+
+- `targetSdk 28` は Lint で Google Play 要件違反と報告されるが、**Google Play への提出予定はなし**。現状維持(lint の `ExpiredTargetSdkVersion` は除外済み)
+- **実機での表示・キャッシュ生成動作は随時検証中**(エミュレータ/ビルドのみでは確認できない項目として継続ウォッチ)
+
+## 第2回の推奨着手順
+
+1. 起動直後のクラッシュ(ゼロ除算)を最優先で修正
+2. 上限執行と「全削除」の競合(キャッシュ整合性)
+3. RAM 表示の正確化(実効上限・全画面実測)
+4. single-flight 統合と冗長コードの整理
+5. 表示まわりの軽微な改善

@@ -3,12 +3,8 @@ package com.example.photostand;
 import android.content.Context;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
-import android.graphics.Matrix;
-import android.system.Os;
 import java.io.File;
-import java.io.FileOutputStream;
 import java.util.Set;
-import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
 import java.util.concurrent.FutureTask;
@@ -20,16 +16,13 @@ import java.util.concurrent.FutureTask;
 final class ViewCache {
     private ViewCache() {}
 
-    private static boolean legacyCleanupStarted;
     /** パス単位の single-flight。先読みと本表示が同じ画像を同時デコードしないようにする。 */
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
     private static final Set<String> ensureInFlight = ConcurrentHashMap.newKeySet();
 
     static synchronized void init(Context c) {
+        // v1 削除と v2 移行は ThumbCache.init() 側のスレッドで一本化している。
         ThumbCache.init(c.getApplicationContext());
-        if (legacyCleanupStarted) return;
-        legacyCleanupStarted = true;
-        new Thread(ViewCache::deleteLegacyCache).start();
     }
 
     private static File fileFor(Photos.Item it, int px) {
@@ -38,19 +31,6 @@ final class ViewCache {
         // v1 には画面長辺まで縮小した低解像度キャッシュが混在するため、v2 へ移行する。
         String key = it.path + "|" + it.size + "|" + it.modified + "|v2|" + px;
         return new File(d, "v2" + ThumbCache.sha1(key) + ".jpg");
-    }
-
-    /** 旧形式v1の全画面キャッシュを削除する。v2 とは名前が違うため並行生成してよい。 */
-    private static void deleteLegacyCache() {
-        for (File d : new File[]{ThumbCache.fullDir(), ThumbCache.dir()}) {
-            File[] fs = d == null ? null : d.listFiles();
-            if (fs == null) continue;
-            for (File f : fs) {
-                String name = f.getName();
-                // v1 は "v" + 40桁のSHA-1 + ".jpg"。先頭が v2 の旧ファイルも確実に削除する。
-                if (name.matches("v[0-9a-f]{40}\\.jpg")) f.delete();
-            }
-        }
     }
 
     static boolean has(Photos.Item it, int px) {
@@ -88,7 +68,7 @@ final class ViewCache {
             f.delete();
         }
         Bitmap b = generate(it, px);
-        if (b != null) write(f, b);
+        if (b != null) ThumbCache.writeJpeg(f, b);
         return b;
     }
 
@@ -101,12 +81,18 @@ final class ViewCache {
     static void ensure(Photos.Item it, int px, boolean regenerateAll) {
         File f = fileFor(it, px);
         if (f == null || (!regenerateAll && f.exists())) return;
+        if (!regenerateAll) {
+            // 通常は get() と同じ single-flight を使う。返る Bitmap は共有なので recycle しない。
+            get(it, px);
+            return;
+        }
+        // 全件再生成だけは既存ファイルも上書きするため専用の排他を使う。
         String key = f.getAbsolutePath();
         if (!ensureInFlight.add(key)) return;
         try {
             Bitmap b = generate(it, px);
             if (b == null) return;
-            write(f, b);
+            ThumbCache.writeJpeg(f, b);   // 自前生成なので recycle してよい
             b.recycle();
         } finally {
             ensureInFlight.remove(key);
@@ -114,50 +100,8 @@ final class ViewCache {
     }
 
     private static Bitmap generate(Photos.Item it, int px) {
-        try {
-            BitmapFactory.Options o = new BitmapFactory.Options();
-            o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(it.path, o);
-            int big = Math.max(o.outWidth, o.outHeight);
-            if (big <= 0) return null;
-            int s = 1;
-            while (big / (s * 2) >= px) s *= 2;
-            o.inJustDecodeBounds = false;
-            o.inSampleSize = s;
-            Bitmap b = BitmapFactory.decodeFile(it.path, o);
-            if (b == null) return null;
-            if (it.rot != 0) {
-                Matrix m = new Matrix();
-                m.postRotate(it.rot);
-                Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
-                if (r != b) b.recycle();
-                b = r;
-            }
-            // 画面長辺への追加縮小は行わず、サンプリング後の解像度を保持して画質を優先する。
-            return b;
-        } catch (Throwable t) {
-            return null;
-        }
+        // 画面長辺への追加縮小は行わず、サンプリング後の解像度を保持して画質を優先する。
+        return ThumbCache.decodeScaled(it, px, false, 0f);
     }
 
-    private static void write(File f, Bitmap b) {
-        if (f == null) return;
-        File parent = f.getParentFile();
-        if (parent != null) parent.mkdirs();
-        File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
-        try (FileOutputStream o = new FileOutputStream(tmp)) {
-            if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
-                throw new java.io.IOException("JPEG compression failed");
-            }
-        } catch (Exception e) {
-            tmp.delete();
-            return;
-        }
-        try {
-            // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
-            Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
-        } catch (Exception e) {
-            tmp.delete();
-        }
-    }
 }

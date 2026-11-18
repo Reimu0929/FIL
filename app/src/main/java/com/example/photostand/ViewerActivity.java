@@ -38,8 +38,13 @@ public class ViewerActivity extends Activity {
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private LruCache<Integer, Bitmap> cache;
     private ZoomImageView iv;
-    private TextView info, stat;
-    private final Set<Integer> preloaded = new HashSet<>();
+    private TextView info, stat, errorView;
+    private final Set<Integer> preloadedRam = new HashSet<>();
+    private final Set<Integer> preloadedDisk = new HashSet<>();
+    /** Settings から参照する、最後に測定した全画面RAMの状態。 */
+    private static volatile long lastFullRamBytes;
+    private static volatile int lastFullRamCount;
+    private static volatile int lastFullRamLimit;
     /** LruCache.snapshot() のコピーなしでキーを追跡する。 */
     private final Set<Integer> cachedKeys = ConcurrentHashMap.newKeySet();
     /** 同じ idx の先読みタスクを積まないためのキュー。 */
@@ -51,6 +56,10 @@ public class ViewerActivity extends Activity {
     private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
+
+    static long fullRamBytes() { return lastFullRamBytes; }
+    static int fullRamCount() { return lastFullRamCount; }
+    static int fullRamLimit() { return lastFullRamLimit; }
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -106,6 +115,13 @@ public class ViewerActivity extends Activity {
         stat.setPadding(40, 32, 40, 24);
         stat.setVisibility(showCount ? View.VISIBLE : View.GONE);
         root.addView(stat, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
+        errorView = new TextView(this);
+        errorView.setTextColor(Color.WHITE);
+        errorView.setTextSize(20);
+        errorView.setShadowLayer(6, 0, 0, Color.BLACK);
+        errorView.setGravity(Gravity.CENTER);
+        errorView.setVisibility(View.GONE);
+        root.addView(errorView, new FrameLayout.LayoutParams(-1, -2, Gravity.TOP | Gravity.CENTER_HORIZONTAL));
         setContentView(root);
         loadItems(bucket);
     }
@@ -120,7 +136,8 @@ public class ViewerActivity extends Activity {
 
     private int initialRamLimit() {
         // 実測前は画面長辺のデコード画像を見積もる。
-        return ramLimitFor((long) target * target * 4L);
+        // デコード結果は長辺最大2倍⇒面積4倍、ARGB_8888 で4バイト⇒ target²×16 が見積もり。
+        return ramLimitFor(16L * target * target);
     }
 
     /** 実測した1枚のサイズが大きくなったときだけ上限を引き上げる。 */
@@ -128,11 +145,21 @@ public class ViewerActivity extends Activity {
         if (bytes <= maxBitmapBytes) return;
         maxBitmapBytes = bytes;
         cache.resize(ramLimitFor(bytes));
+        recordRamState();
     }
 
     private void cachePut(int idx, Bitmap b) {
         cache.put(idx, b);
         cachedKeys.add(idx);
+        recordRamState();
+    }
+
+    /** Settings 表示用に、最後の全画面RAM状態を記録する。 */
+    private void recordRamState() {
+        if (cache == null) return;
+        lastFullRamLimit = cache.maxSize();
+        lastFullRamBytes = cache.size();
+        lastFullRamCount = cachedKeys.size();
     }
 
     /** 一覧を裏で読み込み、終わってから最初の画像を表示する。 */
@@ -171,11 +198,13 @@ public class ViewerActivity extends Activity {
         exPre.shutdownNow();
         exQuery.shutdownNow();
         exHi.shutdownNow();
+        recordRamState();
         if (cache != null) cache.evictAll();
         super.onDestroy();
     }
 
     private void step(int d) {
+        if (items.isEmpty()) return;   // 一覧読み込み完了前のタップ/フリックは無視
         int n = items.size();
         index = ((index + d) % n + n) % n;
         show();
@@ -183,6 +212,7 @@ public class ViewerActivity extends Activity {
     }
 
     private void showInfo() {
+        if (items.isEmpty()) return;
         info.setText(items.get(index).name + "\n" + title + "   " + (index + 1) + " / " + items.size());
         info.setVisibility(View.VISIBLE);
         h.removeCallbacks(hideInfo);
@@ -193,6 +223,7 @@ public class ViewerActivity extends Activity {
     private void show() {
         final int my = ++token;
         final int idx = index;
+        if (errorView != null) errorView.setVisibility(View.GONE);
         trimWindow();
         // 現在画像のデコードを待たずに、隣の先読みを並走させる(連続移動で詰まらないように)。
         prefetch();
@@ -212,7 +243,10 @@ public class ViewerActivity extends Activity {
             Bitmap b = ViewCache.get(items.get(idx), target);
             if (b == null) {
                 h.post(() -> {
-                    if (my == token) Toast.makeText(this, "読み込めません", Toast.LENGTH_SHORT).show();
+                    if (my != token) return;
+                    errorView.setText("読み込めません: " + items.get(idx).name);
+                    errorView.setVisibility(View.VISIBLE);
+                    Toast.makeText(this, "読み込めません", Toast.LENGTH_SHORT).show();
                 });
                 return;
             }
@@ -235,6 +269,7 @@ public class ViewerActivity extends Activity {
             d = Math.min(d, n - d);
             if (d > preload) cache.remove(k);
         }
+        recordRamState();
     }
 
     /**
@@ -249,10 +284,11 @@ public class ViewerActivity extends Activity {
             wanted.add(((index - k) % n + n) % n);
         }
         wanted.remove(index);
-        preloaded.clear();
+        preloadedRam.clear();
+        preloadedDisk.clear();
         preloadTotal = wanted.size();
         for (Integer idx : wanted) {
-            if (cache.get(idx) != null) preloaded.add(idx);
+            if (cache.get(idx) != null) preloadedRam.add(idx);
             else queuePrefetch(idx);
         }
         updateStat();
@@ -290,24 +326,28 @@ public class ViewerActivity extends Activity {
         int d = Math.abs(idx - index);
         d = Math.min(d, n - d);
         if (idx == index || d > preload) return;
-        final boolean ready = cache.get(idx) != null || ViewCache.has(items.get(idx), target);
+        final boolean inRam = cache.get(idx) != null;
+        final boolean onDisk = !inRam && ViewCache.has(items.get(idx), target);
+        if (!inRam && !onDisk) return;
         h.post(() -> {
-            if (my != token || !ready) return;
-            preloaded.add(idx);
+            if (my != token) return;
+            if (inRam) preloadedRam.add(idx);
+            else preloadedDisk.add(idx);
             updateStat();
         });
     }
 
     private void updateStat() {
         if (!showCount) return;
-        stat.setText("先読み(RAM/ディスク): " + preloaded.size() + " / " + preloadTotal
-                + " 枚(左右" + preload + "枚)"
+        stat.setText("先読み: RAM " + preloadedRam.size() + " / ディスク " + preloadedDisk.size()
+                + " / " + preloadTotal + " 枚(左右" + preload + "枚)"
                 + "\nRAM: " + cachedKeys.size() + " 枚 / "
                 + String.format("%.1f MB", cache.size() / 1048576.0));
     }
 
     /** 拡大し始めたら、より細かい画像を読み込んで差し替える。 */
     private void loadHi(final int idx) {
+        if (items.isEmpty()) return;
         final int my = token;
         exHi.execute(() -> {
             if (my != token) return;

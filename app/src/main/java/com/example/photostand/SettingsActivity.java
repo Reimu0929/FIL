@@ -193,7 +193,7 @@ public class SettingsActivity extends Activity {
         version.setTextSize(12);
         version.setTextColor(Color.GRAY);
         version.setPadding(0, dp(24), 0, 0);
-        version.setText("PhotoViewer  バージョン " + versionName());
+        version.setText("フォトビューア  バージョン " + versionName());
         root.addView(version);
 
         setContentView(sv);
@@ -265,10 +265,14 @@ public class SettingsActivity extends Activity {
             Debug.MemoryInfo mi = new Debug.MemoryInfo();
             Debug.getMemoryInfo(mi);
             long fullRamCap = Runtime.getRuntime().maxMemory() / 2L;
+            int effLimit = ViewerActivity.fullRamLimit();
             final String text = "アプリ全体(概算・全画面用も含む): " + mb(mi.getTotalPss() * 1024L)
                     + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
                     + mb(ThumbCache.memBytes())
-                    + "\n全画面RAMの上限(maxMemory/2): " + mb(fullRamCap);
+                    + "\n全画面RAMの天井(maxMemory/2): " + mb(fullRamCap)
+                    + "\n全画面RAMの実効上限: " + (effLimit > 0 ? mb(effLimit) : "—(ビューア未起動)")
+                    + "\n全画面RAMの使用量: " + ViewerActivity.fullRamCount() + " 枚 / "
+                    + mb(ViewerActivity.fullRamBytes()) + " (ビューア終了時点)";
             h.post(() -> {
                 if (destroyed || isFinishing() || memoryInfo == null) return;
                 memoryInfo.setText(text);
