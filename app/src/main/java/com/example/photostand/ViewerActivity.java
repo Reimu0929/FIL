@@ -47,7 +47,7 @@ public class ViewerActivity extends Activity {
     private String title;
     private volatile int index, token, target, thumbPx, preload, preloadTotal;
     private volatile int queryToken;
-    private int maxBitmapBytes;
+    private volatile int maxBitmapBytes;
     private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
@@ -269,15 +269,14 @@ public class ViewerActivity extends Activity {
                     if (b == null) return;
                     noteBitmapSize(b.getByteCount());
                     if (my != token) {
-                        b.recycle();
+                        // ViewCache.get() は single-flight で本表示側にも同じ Bitmap を渡している。
+                        // recycle() すると表示中の画像が黒くなるので、参照を捨てるだけにする。
                         return;
                     }
                     if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
                         cachePut(idx, b);
-                    } else {
-                        // get() がディスクへ保存済みなので、RAMに入らなくても先読みは完了している。
-                        b.recycle();
                     }
+                    // RAM に入らない場合も recycle() しない(同上)。ディスクには保存済み。
                 }
                 // 完了時点の token で表示を更新する(待機中に切り替わっていても最新の状態を反映)。
                 markPreloaded(idx, token);
