@@ -22,8 +22,8 @@ import java.util.concurrent.Executors;
 
 /**
  * 全画面ビューア。
- * ピンチで拡大縮小、左右スワイプ / 画面の左右1/3タップで前後、中央タップでファイル名と枚数、長押しでスライドショー。
- * 前後の写真は先読みして、切り替えをすばやくする。
+ * ピンチで拡大縮小、左右スワイプ / 画面の左右1/3タップで前後、中央タップでファイル名と枚数。
+ * 前後の写真は画面サイズのディスクキャッシュから先読みして、切り替えをすばやくする。
  */
 public class ViewerActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
@@ -35,23 +35,15 @@ public class ViewerActivity extends Activity {
     private TextView info, stat;
     private String title;
     private int index, token, target, thumbPx, preload;
-    private volatile int lastBytes = 12 << 20;
-    private boolean slide, showCount;
+    private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
-    private final Runnable tick = new Runnable() {
-        @Override public void run() {
-            if (slide) {
-                step(1);
-                h.postDelayed(this, 10000);
-            }
-        }
-    };
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
         ThumbCache.init(getApplicationContext());
+        ViewCache.init(getApplicationContext());
         thumbPx = ThumbCache.TIER_PX[ThumbCache.tier(this)];
         preload = Prefs.preload(this);
         showCount = Prefs.showCount(this);
@@ -63,7 +55,7 @@ public class ViewerActivity extends Activity {
 
         DisplayMetrics dm = getResources().getDisplayMetrics();
         target = Math.max(dm.widthPixels, dm.heightPixels);
-        cache = new LruCache<Integer, Bitmap>((int) (Runtime.getRuntime().maxMemory() / 5 * 2)) {
+        cache = new LruCache<Integer, Bitmap>(Math.max(8 << 20, (int) (Runtime.getRuntime().maxMemory() / 6))) {
             @Override protected int sizeOf(Integer key, Bitmap value) {
                 return value.getByteCount();
             }
@@ -80,14 +72,6 @@ public class ViewerActivity extends Activity {
             }
 
             @Override public void onNav(int dir) { step(dir); }
-
-            @Override public void onLong() {
-                slide = !slide;
-                h.removeCallbacks(tick);
-                if (slide) h.postDelayed(tick, 10000);
-                Toast.makeText(ViewerActivity.this,
-                        slide ? "スライドショー 開始" : "スライドショー 停止", Toast.LENGTH_SHORT).show();
-            }
 
             @Override public void onZoomed() { loadHi(index); }
         });
@@ -149,7 +133,7 @@ public class ViewerActivity extends Activity {
         h.postDelayed(hideInfo, 2500);
     }
 
-    /** 今の写真を表示する。先読み済みなら即表示、なければ、サムネイルを仮に出してから読み込む。 */
+    /** 今の写真を表示する。先読み済みなら即表示、なければサムネイルを仮に出す。 */
     private void show() {
         final int my = ++token;
         final int idx = index;
@@ -165,14 +149,13 @@ public class ViewerActivity extends Activity {
         if (thumb != null) iv.setImageFit(thumb);
         exCur.execute(() -> {
             if (my != token) return;
-            Bitmap b = decode(items.get(idx), false);
+            Bitmap b = ViewCache.get(items.get(idx), target);
             if (b == null) {
                 h.post(() -> {
                     if (my == token) Toast.makeText(this, "読み込めません", Toast.LENGTH_SHORT).show();
                 });
                 return;
             }
-            lastBytes = b.getByteCount();
             cache.put(idx, b);
             h.post(() -> {
                 if (my != token) return;
@@ -193,7 +176,10 @@ public class ViewerActivity extends Activity {
         }
     }
 
-    /** 前後の写真を、近い順に裏で読み込んでおく(メモリに入りきらない分は読まない)。 */
+    /**
+     * 前後の写真を近い順に裏で準備する。
+     * メモリに入りきる分はメモリへ、残りは画面サイズのディスクキャッシュへ保存する。
+     */
     private void prefetch() {
         final int n = items.size();
         final int my = token;
@@ -206,12 +192,21 @@ public class ViewerActivity extends Activity {
     private void queuePrefetch(final int idx, final int my) {
         if (idx == index || cache.get(idx) != null) return;
         exPre.execute(() -> {
-            if (my != token || cache.get(idx) != null) return;               // もう別の写真を見ている
-            if (cache.size() + lastBytes > cache.maxSize()) return;           // メモリがいっぱい
-            Bitmap b = decode(items.get(idx), false);
-            if (b == null || my != token) return;
-            lastBytes = b.getByteCount();
-            cache.put(idx, b);
+            if (my != token || cache.get(idx) != null) return;
+            if (cache.size() < cache.maxSize()) {
+                Bitmap b = ViewCache.get(items.get(idx), target);
+                if (b == null || my != token) {
+                    if (b != null) b.recycle();
+                    return;
+                }
+                if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
+                    cache.put(idx, b);
+                } else {
+                    b.recycle();
+                }
+            } else {
+                ViewCache.ensure(items.get(idx), target);
+            }
             if (showCount) h.post(this::updateStat);
         });
     }
@@ -226,7 +221,7 @@ public class ViewerActivity extends Activity {
         final int my = token;
         exCur.execute(() -> {
             if (my != token) return;
-            Bitmap b = decode(items.get(idx), true);
+            Bitmap b = decodeHi(items.get(idx));
             if (b == null) return;
             h.post(() -> {
                 if (my == token) iv.setImageKeepView(b);
@@ -234,11 +229,8 @@ public class ViewerActivity extends Activity {
         });
     }
 
-    /**
-     * hi=false: 画面サイズに合わせて縮小して読み込む(速い)。
-     * hi=true : 拡大用に、最大4096pxまでの細かさで読み込む。通常より細かくならないときは null。
-     */
-    private Bitmap decode(Photos.Item it, boolean hi) {
+    /** 拡大用に、最大4096pxまでの細かさで読み込む。画面サイズより細かくならないときは null。 */
+    private Bitmap decodeHi(Photos.Item it) {
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
@@ -246,12 +238,9 @@ public class ViewerActivity extends Activity {
             int big = Math.max(o.outWidth, o.outHeight);
             int fit = 1;
             while (big / (fit * 2) >= target) fit *= 2;
-            int s = fit;
-            if (hi) {
-                s = 1;
-                while (big / s > 4096) s *= 2;
-                if (s >= fit) return null;
-            }
+            int s = 1;
+            while (big / s > 4096) s *= 2;
+            if (s >= fit) return null;
             o.inJustDecodeBounds = false;
             o.inSampleSize = s;
             Bitmap b = BitmapFactory.decodeFile(it.path, o);

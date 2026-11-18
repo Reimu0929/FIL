@@ -16,23 +16,35 @@ import android.widget.TextView;
 
 /** 設定画面。キャッシュの管理と、先読みなどの調整。 */
 public class SettingsActivity extends Activity {
-    private static final int[] LIMITS = {100, 300, 500, 1000, 2000};
-    private static final String[] LIMIT_LABELS = {"100MB", "300MB", "500MB", "1GB", "2GB"};
-    private static final int[] PRELOADS = {0, 1, 2, 3, 5, 10};
-    private static final String[] PRELOAD_LABELS = {"なし", "左右1枚", "左右2枚", "左右3枚", "左右5枚", "左右10枚"};
-    private static final float[] PAGES = {0f, 0.5f, 1f, 2f, 2.5f, 3f, 5f};
-    private static final String[] PAGE_LABELS = {"なし", "半ページ分", "1ページ分", "2ページ分", "2ページ半", "3ページ分", "5ページ分"};
+    private static final int[] LIMITS = {100, 300, 500, 1000, 2000, 5000, 10000};
+    private static final String[] LIMIT_LABELS = {"100MB", "300MB", "500MB", "1GB", "2GB", "5GB", "10GB"};
+    private static final int[] PRELOADS = {0, 1, 2, 3, 5, 10, 20, 30, 50, 100};
+    private static final String[] PRELOAD_LABELS = {
+            "なし", "左右1枚", "左右2枚", "左右3枚", "左右5枚",
+            "左右10枚", "左右20枚", "左右30枚", "左右50枚", "左右100枚"};
+    private static final int[] PRELOAD_ALL = {0, 1, 2};
+    private static final String[] PRELOAD_ALL_LABELS = {
+            "オフ(開いた写真の前後だけ先読み)",
+            "起動時に全フォルダを先読み",
+            "フォルダを開いたときにそのフォルダを先読み"};
+    private static final float[] PAGES = {0f, 0.5f, 1f, 1.5f, 2f, 2.5f, 3f, 5f};
+    private static final String[] PAGE_LABELS = {
+            "なし", "半ページ分", "1ページ分", "1.5ページ分",
+            "2ページ分", "2ページ半", "3ページ分", "5ページ分"};
 
     private final Handler h = new Handler(Looper.getMainLooper());
-    private TextView cacheInfo, jobStatus, limitV, preloadV, pagesV;
-    private Button jobBtn;
+    private TextView cacheInfo, jobStatus, preloadStatus, limitV, preloadV, pagesV, preloadAllV;
+    private Button jobBtn, preloadBtn;
     private int pollCount;
 
     private final Runnable poll = new Runnable() {
         @Override public void run() {
-            jobStatus.setText(CacheJob.status());
+            jobStatus.setText("サムネイル: " + CacheJob.status());
             jobBtn.setText(CacheJob.running ? "生成を停止" : "全キャッシュを生成(大・中・小 / 全フォルダ)");
-            if (CacheJob.running) {
+            preloadStatus.setText("全画面: " + ViewPreloader.status());
+            preloadBtn.setText(ViewPreloader.running ? "先読みを停止" : "全画面用キャッシュを生成(全フォルダ)");
+            boolean busy = CacheJob.running || ViewPreloader.running;
+            if (busy) {
                 getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 if (++pollCount % 6 == 0) refreshInfo();
             } else {
@@ -50,6 +62,7 @@ public class SettingsActivity extends Activity {
         super.onCreate(state);
         setTitle("設定");
         ThumbCache.init(getApplicationContext());
+        ViewCache.init(getApplicationContext());
 
         ScrollView sv = new ScrollView(this);
         LinearLayout root = new LinearLayout(this);
@@ -78,7 +91,7 @@ public class SettingsActivity extends Activity {
         Button clear = new Button(this);
         clear.setText("キャッシュをすべて削除");
         clear.setOnClickListener(v -> new AlertDialog.Builder(this)
-                .setMessage("保存したサムネイルをすべて削除します。写真は消えません。")
+                .setMessage("保存したサムネイルと全画面用キャッシュをすべて削除します。写真は消えません。")
                 .setPositiveButton("削除", (d, w) -> new Thread(() -> {
                     ThumbCache.clearDisk();
                     h.post(this::refreshInfo);
@@ -95,6 +108,25 @@ public class SettingsActivity extends Activity {
                         h.post(this::refreshInfo);
                     }).start();
                 }));
+
+        section(root, "全画面用の先読み");
+        preloadAllV = row(root, "先読みのタイミング", v -> choose("先読みのタイミング", PRELOAD_ALL_LABELS,
+                indexOf(PRELOAD_ALL, Prefs.preloadAll(this)), i -> {
+                    Prefs.setPreloadAll(this, PRELOAD_ALL[i]);
+                    showValues();
+                }));
+
+        preloadBtn = new Button(this);
+        preloadBtn.setOnClickListener(v -> {
+            if (ViewPreloader.running) ViewPreloader.stop();
+            else ViewPreloader.startAll(this);
+        });
+        root.addView(preloadBtn);
+        preloadStatus = new TextView(this);
+        preloadStatus.setTextSize(14);
+        preloadStatus.setTextColor(Color.GRAY);
+        preloadStatus.setPadding(0, dp(4), 0, dp(8));
+        root.addView(preloadStatus);
 
         section(root, "表示と先読み");
         preloadV = row(root, "全画面の先読み枚数", v -> choose("全画面の先読み枚数", PRELOAD_LABELS,
@@ -116,6 +148,13 @@ public class SettingsActivity extends Activity {
         sw.setOnCheckedChangeListener((b, on) -> Prefs.sp(this).edit().putBoolean("showCount", on).apply());
         root.addView(sw);
 
+        TextView version = new TextView(this);
+        version.setTextSize(12);
+        version.setTextColor(Color.GRAY);
+        version.setPadding(0, dp(24), 0, 0);
+        version.setText("PhotoViewer  バージョン " + versionName());
+        root.addView(version);
+
         setContentView(sv);
         showValues();
     }
@@ -133,8 +172,10 @@ public class SettingsActivity extends Activity {
 
     private void showValues() {
         limitV.setText(LIMIT_LABELS[indexOf(LIMITS, Prefs.limitMb(this))] + "(超えたら古いものから削除)");
-        preloadV.setText(PRELOAD_LABELS[indexOf(PRELOADS, Prefs.preload(this))] + "(増やすほどメモリを使います)");
+        preloadV.setText(PRELOAD_LABELS[indexOf(PRELOADS, Prefs.preload(this))]
+                + "(最大 " + Prefs.PRELOAD_MAX + " 枚。増やすほどメモリを使います)");
         pagesV.setText(PAGE_LABELS[indexOf(PAGES, Prefs.pages(this))] + "(画面の外のサムネイルを先に作ります)");
+        preloadAllV.setText(PRELOAD_ALL_LABELS[indexOf(PRELOAD_ALL, Prefs.preloadAll(this))]);
     }
 
     /** キャッシュフォルダの大きさを数えて表示する(裏のスレッドで数える)。 */
@@ -146,6 +187,14 @@ public class SettingsActivity extends Activity {
                     + "(" + st[1] + " ファイル)";
             h.post(() -> cacheInfo.setText(text));
         }).start();
+    }
+
+    private String versionName() {
+        try {
+            return getPackageManager().getPackageInfo(getPackageName(), 0).versionName;
+        } catch (Exception e) {
+            return "?";
+        }
     }
 
     private void section(LinearLayout parent, String title) {

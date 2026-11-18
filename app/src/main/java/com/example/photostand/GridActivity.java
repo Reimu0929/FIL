@@ -59,6 +59,7 @@ public class GridActivity extends Activity {
         items = Photos.load(getContentResolver(), bucket);
         if (items.isEmpty()) { finish(); return; }
         setTitle(name + "  (" + items.size() + ")");
+        if (Prefs.preloadAll(this) == 2) ViewPreloader.startFolder(this, bucket);
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);

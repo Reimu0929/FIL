@@ -78,6 +78,7 @@ public class MainActivity extends Activity {
         super.onResume();
         if (granted()) {
             load();
+            maybeStartupPreload();
         } else if (!asked) {
             asked = true;
             requestPermissions(new String[]{Manifest.permission.READ_EXTERNAL_STORAGE}, 1);
@@ -85,7 +86,17 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
-        if (!granted()) empty.setText("写真へのアクセスを許可してください");
+        if (granted()) {
+            load();
+            maybeStartupPreload();
+        } else {
+            empty.setText("写真へのアクセスを許可してください");
+        }
+    }
+
+    /** 設定が「起動時に全フォルダを先読み」なら、起動後に一度だけ全画面用キャッシュを作る。 */
+    private void maybeStartupPreload() {
+        if (Prefs.preloadAll(this) == 1) ViewPreloader.startAllOnce(this);
     }
 
     private boolean granted() {

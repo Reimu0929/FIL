@@ -15,7 +15,6 @@ public class ZoomImageView extends ImageView {
     interface Listener {
         void onTap(float x, float width);
         void onNav(int dir);
-        void onLong();
         void onZoomed();
     }
 
@@ -26,6 +25,8 @@ public class ZoomImageView extends ImageView {
     private Listener listener;
     private float base = 1f;
     private boolean zoomNotified;
+    /** 長押し後の指離しをタップとして扱わないためのフラグ。 */
+    private boolean longPressed;
 
     public ZoomImageView(Context c) {
         super(c);
@@ -49,7 +50,10 @@ public class ZoomImageView extends ImageView {
         });
 
         gd = new GestureDetector(c, new GestureDetector.SimpleOnGestureListener() {
-            @Override public boolean onDown(MotionEvent e) { return true; }
+            @Override public boolean onDown(MotionEvent e) {
+                longPressed = false;
+                return true;
+            }
 
             @Override public boolean onScroll(MotionEvent a, MotionEvent b, float dx, float dy) {
                 if (sgd.isInProgress() || !isZoomed()) return false;
@@ -68,13 +72,17 @@ public class ZoomImageView extends ImageView {
             }
 
             @Override public boolean onSingleTapUp(MotionEvent e) {
+                if (longPressed) {
+                    longPressed = false;
+                    return true;
+                }
                 if (isZoomed()) resetFit();
                 else if (listener != null) listener.onTap(e.getX(), getWidth());
                 return true;
             }
 
             @Override public void onLongPress(MotionEvent e) {
-                if (!isZoomed() && listener != null) listener.onLong();
+                longPressed = true;
             }
         });
     }

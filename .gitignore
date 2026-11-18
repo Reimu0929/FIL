@@ -1,0 +1,7 @@
+.gradle/
+.review-tools/
+app/build/
+build/
+local.properties
+*.iml
+.idea/

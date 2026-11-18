@@ -65,6 +65,11 @@ final class ThumbCache {
         Prefs.sp(c).edit().putInt("tier", t).apply();
     }
 
+    /** サムネイルと全画面用キャッシュが共有するディレクトリ。 */
+    static File dir() {
+        return dir;
+    }
+
     private static String memKey(Photos.Item it, int px) {
         return it.path + "|" + it.size + "|" + it.modified + "|" + px;
     }
@@ -175,7 +180,7 @@ final class ThumbCache {
         }
     }
 
-    private static String sha1(String s) {
+    static String sha1(String s) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-1").digest(s.getBytes(StandardCharsets.UTF_8));
             StringBuilder sb = new StringBuilder();
