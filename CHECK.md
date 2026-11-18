@@ -148,3 +148,54 @@
 3. RAM 表示の正確化(実効上限・全画面実測)
 4. single-flight 統合と冗長コードの整理
 5. 表示まわりの軽微な改善
+
+---
+
+# 追加レビュー(2026-11-18・第3回 / コミット d21080e 反映後のコードが対象)
+
+## ✅ 第2回の15件: 全件反映済みを確認
+
+- [x] クラッシュガード — `step()` / `showInfo()` / `loadHi()` の3箇所に `items.isEmpty()` ガード
+- [x] 閲覧中の上限執行 — `writeJpeg()` が16回ごとに `pruneInternal()` を実行
+- [x] 全削除の競合 — `diskLock` + `clearing` フラグで書き込みと完全に互斥
+- [x] RAM表示の正確化 — 天井 / 実効上限 / 使用量の3行表示 + `ViewerActivity` の static 状態を参照
+- [x] single-flight統合 — `ViewCache.ensure(false)` が `get()` 経由に一本化
+- [x] v1掃除の一本化 — 加えてgit履歴で検証し、`full/` にv1名で書き込まれた実績は一度も無いため、thumbs側のみの掃除で漏れなし
+- [x] 重複コード整理 — `Jobs` / `writeJpeg` / `decodeScaled` へ統合
+- [x] 残り8件(デッドコード除去・先読みRAM/ディスク分離・errorView・`[保留]`表示・`idx|px`キー・見積り16t²・命名統一 ほか)もすべて反映
+
+## 🔴 優先度: 高(新規)
+
+- [x] **`Jobs.java` が API 24 以上を要求するクラスを使用し、Android 5.0〜6.x でクラッシュする**
+  - `Jobs.java:5,17` — `import java.util.function.BooleanSupplier;` / 引数型として使用
+  - `java.util.function` は Android API 24 で追加されたクラス。`app/build.gradle` は `minSdk 21` かつ `coreLibraryDesugaring` 無効のため、API 21〜23 では `CacheJob.start()` / ViewPreloader 開始時に `NoClassDefFoundError`
+  - 「アプリ起動時に生成」モードなら起動直後にクラッシュ。README の「Android 5.0 以上」に反する
+  - コンパイルは通るため GitHub Actions では検出されない(lint の NewApi 警告もビルドを失敗させない)
+  - 修正: `Jobs` 内に独自の `interface Cancelled { boolean get(); }` を定義して置換する(数行)
+
+## 🟡 優先度: 中〜低(残存・新規)
+
+- [x] **`writeJpeg()` のロック範囲が広く、キャッシュ生成の並列性が低下した**
+  - `ThumbCache.java:239-270` — JPEG圧縮(`b.compress`)まで `diskLock` 保持内で実行しており、ViewPreloader の2 worker の並列圧縮が効かなくなった
+  - さらに16回ごとの `pruneInternal()`(全ファイル列挙 + ソート + 削除)もロック内で走り、書き込み側スレッドが瞬間的に停止する
+  - 修正案: 一時ファイル作成はロック外で行い、`clearing` チェック + `Os.rename` のみをロック内に残す
+- [ ] **全削除直後に数ファイルだけ復活する余地が残る** — 競合自体は解消済みだが、削除**後**に開始したキュー済み prefetch タスク(停止していない Grid / Viewer の裏スレッド)が新規書き込みする。実害は軽微
+- [ ] **`ThumbCache.ensureAll()` と `ThumbCache.get()` の single-flight が別体系** — ViewCache 側は今回統合済みだが、Thumb 側は `allInFlight` が分離したまま(対称的な残存)
+
+  ※ 上記2件は実害が軽微かつ他スレッドの世代受け渡し等が必要なため、今回は見送り(次回以降の候補)。
+
+## 🟢 優先度: 低(軽微)
+
+- [x] `writeJpeg()` 内の `clearing` チェック2箇所は `diskLock` 保持中は常に false となるため実質デッドコード(防御コードとしては可)
+- [x] Settings の「全画面RAMの使用量」行が、ビューア未起動でも「0 枚 / 0.0 MB (ビューア終了時点)」と出る — 実効上限行の「—(ビューア未起動)」と表記が不統一
+- [x] 「(ビューア終了時点)」という文言は不正確 — ビューアが背面で生存中は `cachePut()` のたびに値が随時更新される
+- [x] `ViewPreloader.status()` の一覧取得中「0 / 0 枚処理済み」表記は残存
+- [x] `ThumbCache.dir()` がどこからも参照されずデッドAPI化(第2回の掃除一本化の副作用)
+
+## 第3回の推奨着手順
+
+1. `BooleanSupplier` を独自インターフェースへ置換(Android 5.0〜6.x のクラッシュ回避)
+2. 任意: `writeJpeg()` のロック範囲を rename 周りだけに縮小
+3. その他は実害が軽微なため、必要になった時点で対応
+
+**対応結果(2026-11-18)**: 1・2・軽微7件は反映済み(`Cancelled` / `diskGeneration` / ロック縮小 / 表記統一 / デッドAPI削除)。🟡の残り2件は保留。

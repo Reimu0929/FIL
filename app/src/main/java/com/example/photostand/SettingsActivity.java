@@ -271,8 +271,9 @@ public class SettingsActivity extends Activity {
                     + mb(ThumbCache.memBytes())
                     + "\n全画面RAMの天井(maxMemory/2): " + mb(fullRamCap)
                     + "\n全画面RAMの実効上限: " + (effLimit > 0 ? mb(effLimit) : "—(ビューア未起動)")
-                    + "\n全画面RAMの使用量: " + ViewerActivity.fullRamCount() + " 枚 / "
-                    + mb(ViewerActivity.fullRamBytes()) + " (ビューア終了時点)";
+                    + "\n全画面RAMの使用量: " + (effLimit > 0
+                            ? ViewerActivity.fullRamCount() + " 枚 / " + mb(ViewerActivity.fullRamBytes())
+                            : "—(ビューア未起動)");
             h.post(() -> {
                 if (destroyed || isFinishing() || memoryInfo == null) return;
                 memoryInfo.setText(text);

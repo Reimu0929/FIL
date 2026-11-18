@@ -44,10 +44,11 @@ final class ThumbCache {
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
     private static final Set<String> allInFlight = ConcurrentHashMap.newKeySet();
     private static final char[] HEX = "0123456789abcdef".toCharArray();
-    /** ディスク書き込み・全削除・剪定を互斥するロック。 */
+    /** 全削除と rename を互斥するロック。 */
     private static final Object diskLock = new Object();
-    private static volatile boolean clearing;
-    private static int writesSincePrune;
+    /** 全削除のたびに進む世代。書き込み開始時と不同ならコミットしない。 */
+    private static volatile long diskGeneration;
+    private static final AtomicInteger writesSincePrune = new AtomicInteger();
 
     static synchronized void init(Context ctx) {
         if (mem != null) return;
@@ -108,11 +109,6 @@ final class ThumbCache {
 
     static void setTier(Context c, int t) {
         Prefs.sp(c).edit().putInt("tier", t).apply();
-    }
-
-    /** サムネイル用のディレクトリ。 */
-    static File dir() {
-        return dir;
     }
 
     /** 全画面用キャッシュのディレクトリ。 */
@@ -235,37 +231,42 @@ final class ThumbCache {
         }
     }
 
-    /** サムネイル/全画面どちらもここで書き込む。全削除と競合しないよう diskLock で互斥する。 */
+    /** サムネイル/全画面どちらもここで書き込む。圧縮はロック外、rename だけロック内で行う。 */
     static void writeJpeg(File f, Bitmap b) {
+        final long gen = diskGeneration;
+        File parent = f.getParentFile();
+        if (parent != null) parent.mkdirs();
+        File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
+        try (FileOutputStream o = new FileOutputStream(tmp)) {
+            if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
+                throw new java.io.IOException("JPEG compression failed");
+            }
+        } catch (Exception e) {
+            tmp.delete();
+            return;
+        }
+        boolean committed;
         synchronized (diskLock) {
-            if (clearing) return;
-            File parent = f.getParentFile();
-            if (parent != null) parent.mkdirs();
-            File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
-            try (FileOutputStream o = new FileOutputStream(tmp)) {
-                if (!b.compress(Bitmap.CompressFormat.JPEG, 85, o)) {
-                    throw new java.io.IOException("JPEG compression failed");
+            if (gen != diskGeneration) {
+                committed = false;   // 圧縮中に全削除が走った
+            } else {
+                try {
+                    // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
+                    Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
+                    committed = true;
+                } catch (Exception e) {
+                    committed = false;
                 }
-            } catch (Exception e) {
-                tmp.delete();
-                return;
             }
-            if (clearing) {
-                tmp.delete();
-                return;
-            }
-            try {
-                // 同じディレクトリ内で原子的に置き換える。再生成時も既存ファイルへ上書きできる。
-                Os.rename(tmp.getAbsolutePath(), f.getAbsolutePath());
-            } catch (Exception e) {
-                tmp.delete();
-                return;
-            }
-            // 閲覧だけのセッションでも上限が効くよう、一定回数ごとに剪定する。
-            if (++writesSincePrune >= 16) {
-                writesSincePrune = 0;
-                pruneInternal();
-            }
+        }
+        if (!committed) {
+            tmp.delete();
+            return;
+        }
+        // 閲覧だけのセッションでも上限が効くよう、一定回数ごとに剪定する(ロック外)。
+        if (writesSincePrune.incrementAndGet() >= 16) {
+            writesSincePrune.set(0);
+            pruneNow();
         }
     }
 
@@ -371,12 +372,8 @@ final class ThumbCache {
     /** ディスクとメモリのキャッシュをすべて消す(裏書き込みと競合しない)。 */
     static void clearDisk() {
         synchronized (diskLock) {
-            clearing = true;
-            try {
-                for (File f : allFiles(false)) f.delete();
-            } finally {
-                clearing = false;
-            }
+            diskGeneration++;   // 圧縮中の書き込みをコミットさせない
+            for (File f : allFiles(false)) f.delete();
         }
         if (mem != null) mem.evictAll();
     }
