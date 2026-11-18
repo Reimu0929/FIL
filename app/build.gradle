@@ -24,9 +24,19 @@ android {
         debug {
             signingConfig signingConfigs.debug
         }
+        release {
+            // debug.keystore と同じ鍵で署名するので署名は同じまま(上書きインストール可)。
+            // debuggable は付かないため、配布はこちらを使う。
+            signingConfig signingConfigs.debug
+            minifyEnabled false
+        }
     }
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_1_8
         targetCompatibility JavaVersion.VERSION_1_8
+    }
+    lint {
+        // targetSdk 28(レガシーストレージ)は現行仕様。Google Play の政策チェックのみ対象外にする。
+        disable 'ExpiredTargetSdkVersion'
     }
 }

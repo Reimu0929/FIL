@@ -73,14 +73,22 @@ final class Photos {
         while (i < la && j < lb) {
             char ca = a.charAt(i), cb = b.charAt(j);
             if (digit(ca) && digit(cb)) {
+                // 部分文字列も正規表現も作らず、桁数→辞書順で比較する。
+                // 先頭のゼロは読み飛ばすので "img0002" と "img2" は同じ数値として扱われる。
                 int si = i, sj = j;
+                while (si < la && a.charAt(si) == '0') si++;
+                while (sj < lb && b.charAt(sj) == '0') sj++;
+                int di = si, dj = sj;
                 while (i < la && digit(a.charAt(i))) i++;
                 while (j < lb && digit(b.charAt(j))) j++;
-                String na = a.substring(si, i).replaceFirst("^0+", "");
-                String nb = b.substring(sj, j).replaceFirst("^0+", "");
-                if (na.length() != nb.length()) return na.length() < nb.length() ? -1 : 1;
-                int r = na.compareTo(nb);
-                if (r != 0) return r;
+                if (i < di) di = i;
+                if (j < dj) dj = j;
+                int lenA = i - di, lenB = j - dj;
+                if (lenA != lenB) return lenA < lenB ? -1 : 1;
+                for (int p = 0; p < lenA; p++) {
+                    char x = a.charAt(di + p), y = b.charAt(dj + p);
+                    if (x != y) return x < y ? -1 : 1;
+                }
             } else {
                 int r = Character.toLowerCase(ca) - Character.toLowerCase(cb);
                 if (r != 0) return r;

@@ -7,7 +7,11 @@ import android.graphics.Matrix;
 import android.system.Os;
 import java.io.File;
 import java.io.FileOutputStream;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
 
 /**
  * 全画面表示用のディスクキャッシュ。画面サイズに縮小した JPEG を
@@ -17,6 +21,9 @@ final class ViewCache {
     private ViewCache() {}
 
     private static boolean legacyCleanupStarted;
+    /** パス単位の single-flight。先読みと本表示が同じ画像を同時デコードしないようにする。 */
+    private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
+    private static final Set<String> ensureInFlight = ConcurrentHashMap.newKeySet();
 
     static synchronized void init(Context c) {
         ThumbCache.init(c.getApplicationContext());
@@ -53,7 +60,28 @@ final class ViewCache {
     /** ディスクにあれば読み込み、なければ作って保存する(裏のスレッドから呼ぶこと)。 */
     static Bitmap get(Photos.Item it, int px) {
         File f = fileFor(it, px);
-        if (f != null && f.exists()) {
+        if (f == null) return null;
+        String key = f.getAbsolutePath();
+        FutureTask<Bitmap> task = new FutureTask<>(() -> loadOrCreate(f, it, px));
+        Future<Bitmap> pending = inFlight.putIfAbsent(key, task);
+        if (pending == null) {
+            pending = task;
+            try {
+                task.run();
+            } finally {
+                inFlight.remove(key, task);
+            }
+        }
+        try {
+            return pending.get();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 同じパスの生成を1回だけ行う(single-flight の実体)。 */
+    private static Bitmap loadOrCreate(File f, Photos.Item it, int px) {
+        if (f.exists()) {
             Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
             if (b != null) return b;
             f.delete();
@@ -72,10 +100,16 @@ final class ViewCache {
     static void ensure(Photos.Item it, int px, boolean regenerateAll) {
         File f = fileFor(it, px);
         if (f == null || (!regenerateAll && f.exists())) return;
-        Bitmap b = generate(it, px);
-        if (b == null) return;
-        write(f, b);
-        b.recycle();
+        String key = f.getAbsolutePath();
+        if (!ensureInFlight.add(key)) return;
+        try {
+            Bitmap b = generate(it, px);
+            if (b == null) return;
+            write(f, b);
+            b.recycle();
+        } finally {
+            ensureInFlight.remove(key);
+        }
     }
 
     private static Bitmap generate(Photos.Item it, int px) {

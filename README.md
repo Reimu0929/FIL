@@ -29,9 +29,9 @@
 ## APKの作り方(GitHub Actions、PCに何も入れなくてよい)
 1. GitHubで新しいリポジトリを作り、このフォルダの中身(`.github` を含む)をすべてアップロードする
 2. 「Actions」タブ → build → 完了を待つ
-3. 実行結果の「Artifacts」から `PhotoViewer-apk` をダウンロードして展開し、`app-debug.apk` を端末に入れる
+3. 実行結果の「Artifacts」から `PhotoViewer-apk` をダウンロードして展開し、`app-release.apk` を端末に入れる
 
 ## 署名について
-`debug.keystore` をリポジトリに含め、ビルド時にそれを使うようにしてあります。
-そのため、GitHub Actions で何度ビルドしても同じ署名のAPKになり、上書きインストールできます。
+`debug.keystore` をリポジトリに含め、`debug` / `release` の両ビルドでそれを使うようにしてあります。
+配布物は `release` ビルド(`debuggable` なし)ですが、署名鍵は今までと同じ `debug.keystore` なので、上書きインストールできます。
 以前のAPKから切り替えるときだけ、署名が違うため一度アンインストールしてから入れてください。

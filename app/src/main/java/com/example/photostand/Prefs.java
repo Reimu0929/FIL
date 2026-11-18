@@ -9,8 +9,6 @@ final class Prefs {
 
     /** 全画面の先読み枚数の上限(左右それぞれ)。 */
     static final int PRELOAD_MAX = 100;
-    /** キャッシュサイズの上限(MB)。 */
-    static final int CACHE_MAX_MB = 10000;
 
     static SharedPreferences sp(Context c) {
         return c.getSharedPreferences("ps", Context.MODE_PRIVATE);

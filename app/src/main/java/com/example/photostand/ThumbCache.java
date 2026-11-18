@@ -13,7 +13,12 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Set;
 import java.util.UUID;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Future;
+import java.util.concurrent.FutureTask;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * サムネイルのキャッシュ。メモリ(アプリ全体で共有)とディスクの2段構え。
@@ -32,12 +37,22 @@ final class ThumbCache {
     private static Context app;
     static String where = "本体";
 
+    /** LruCache.snapshot() でマップ全体をコピーせずに枚数を追跡する。 */
+    private static final AtomicInteger memCount = new AtomicInteger();
+    /** キー単位の single-flight。同じ画像の同時デコード・同時JPEG書き込みを防ぐ。 */
+    private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
+    private static final Set<String> allInFlight = ConcurrentHashMap.newKeySet();
+    private static final char[] HEX = "0123456789abcdef".toCharArray();
+
     static synchronized void init(Context ctx) {
         if (mem != null) return;
         app = ctx.getApplicationContext();
         mem = new LruCache<String, Bitmap>((int) (Runtime.getRuntime().maxMemory() / 8)) {
             @Override protected int sizeOf(String key, Bitmap value) {
                 return value.getByteCount();
+            }
+            @Override protected void entryRemoved(boolean evicted, String key, Bitmap oldValue, Bitmap newValue) {
+                memCount.decrementAndGet();
             }
         };
         File base = null;
@@ -86,9 +101,9 @@ final class ThumbCache {
         return mem.get(memKey(it, px));
     }
 
-    /** メモリ内のサムネイル数。 */
+    /** メモリ内のサムネイル数(snapshot を作らずカウンタで返す)。 */
     static int memCount() {
-        return mem == null ? 0 : mem.snapshot().size();
+        return memCount.get();
     }
 
     /** メモリ内のサムネイルが占めるバイト数。 */
@@ -101,49 +116,91 @@ final class ThumbCache {
         String k = memKey(it, px);
         Bitmap b = mem.get(k);
         if (b != null) return b;
-        File f = fileFor(it, px);
-        if (f.exists()) {
-            b = BitmapFactory.decodeFile(f.getAbsolutePath());
-            if (b != null) {
-                mem.put(k, b);
-                return b;
+        FutureTask<Bitmap> task = new FutureTask<>(() -> loadOrCreate(k, it, px));
+        Future<Bitmap> f = inFlight.putIfAbsent(k, task);
+        if (f == null) {
+            f = task;
+            try {
+                task.run();
+            } finally {
+                inFlight.remove(k, task);
             }
-            f.delete();
+        }
+        try {
+            return f.get();
+        } catch (Exception e) {
+            return null;
+        }
+    }
+
+    /** 同じキーの生成を1回だけ行う(single-flight の実体)。 */
+    private static Bitmap loadOrCreate(String k, Photos.Item it, int px) {
+        File f = fileFor(it, px);
+        if (!f.exists()) {
+            // 小さい画像では段階ファイルを省くため、最大段のファイルを代用する。
+            File largest = fileFor(it, TIER_PX[TIER_PX.length - 1]);
+            if (largest.exists()) f = largest;
+        }
+        Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getAbsolutePath()) : null;
+        if (b != null) {
+            memPut(k, b);
+            return b;
         }
         b = generate(it, px);
         if (b != null) {
-            mem.put(k, b);
-            write(f, b);
+            memPut(k, b);
+            write(fileFor(it, px), b);
         }
         return b;
     }
 
-    /**
-     * 3つのサイズのうち、まだ無いものをディスクに作る(メモリには入れない)。
-     * 一番大きいサイズで1回だけ読み込み、そこから小さいサイズを作るので速い。
-     */
-    static void ensureAll(Photos.Item it) {
-        ensureAll(it, false);
+    private static void memPut(String k, Bitmap b) {
+        mem.put(k, b);
+        memCount.incrementAndGet();
     }
 
     /** 未作成のものだけ、または regenerateAll が true なら全サイズを作り直す。 */
     static void ensureAll(Photos.Item it, boolean regenerateAll) {
-        boolean[] need = new boolean[TIER_PX.length];
-        int top = -1;
-        for (int t = 0; t < TIER_PX.length; t++) {
-            need[t] = regenerateAll || !fileFor(it, TIER_PX[t]).exists();
-            if (need[t]) top = t;
+        String allKey = it.path + "|" + it.size + "|" + it.modified;
+        if (!allInFlight.add(allKey)) return;
+        try {
+            int largest = TIER_PX.length - 1;
+            int shortSide = sourceShortSide(it);
+            boolean[] need = new boolean[TIER_PX.length];
+            int top = -1;
+            for (int t = 0; t < TIER_PX.length; t++) {
+                // ソースより大きい段は縮小されず同一内容になるので、最大段だけを持つ。
+                boolean meaningful = (t == largest) || shortSide > TIER_PX[t];
+                need[t] = meaningful && (regenerateAll || !fileFor(it, TIER_PX[t]).exists());
+                if (need[t]) top = t;
+            }
+            if (top < 0) return;
+            Bitmap base = generate(it, TIER_PX[top]);
+            if (base == null) return;
+            for (int t = 0; t < TIER_PX.length; t++) {
+                if (!need[t]) continue;
+                Bitmap b = (t == top) ? base : scaleShort(base, TIER_PX[t], 1f);
+                // 縮小されず上位段と同一内容になるファイルは作らない(読み出し時に最大段へフォールバック)。
+                if (b == base && t != top) continue;
+                write(fileFor(it, TIER_PX[t]), b);
+                if (b != base) b.recycle();
+            }
+            base.recycle();
+        } finally {
+            allInFlight.remove(allKey);
         }
-        if (top < 0) return;
-        Bitmap base = generate(it, TIER_PX[top]);
-        if (base == null) return;
-        for (int t = 0; t < TIER_PX.length; t++) {
-            if (!need[t]) continue;
-            Bitmap b = (t == top) ? base : scaleShort(base, TIER_PX[t], 1f);
-            write(fileFor(it, TIER_PX[t]), b);
-            if (b != base) b.recycle();
+    }
+
+    /** 元画像の短辺(回転しても短辺は変わらない)。段階の要否判定に使う。 */
+    private static int sourceShortSide(Photos.Item it) {
+        try {
+            BitmapFactory.Options o = new BitmapFactory.Options();
+            o.inJustDecodeBounds = true;
+            BitmapFactory.decodeFile(it.path, o);
+            return Math.min(o.outWidth, o.outHeight);
+        } catch (Throwable t) {
+            return Integer.MAX_VALUE;
         }
-        base.recycle();
     }
 
     private static void write(File f, Bitmap b) {
@@ -203,8 +260,11 @@ final class ThumbCache {
     static String sha1(String s) {
         try {
             byte[] d = MessageDigest.getInstance("SHA-1").digest(s.getBytes(StandardCharsets.UTF_8));
-            StringBuilder sb = new StringBuilder();
-            for (byte x : d) sb.append(String.format("%02x", x));
+            StringBuilder sb = new StringBuilder(d.length * 2);
+            for (byte x : d) {
+                int v = x & 0xFF;
+                sb.append(HEX[v >>> 4]).append(HEX[v & 0x0F]);
+            }
             return sb.toString();
         } catch (Exception e) {
             return Integer.toHexString(s.hashCode());
@@ -245,9 +305,21 @@ final class ThumbCache {
         if (mem != null) mem.evictAll();
     }
 
+    /** 書き込み中断・プロセスkillで残った古い .tmp を掃除する(完成済みキャッシュは触らない)。 */
+    private static void deleteStaleTemp() {
+        File[] all = dir == null ? null : dir.listFiles();
+        if (all == null) return;
+        long cutoff = System.currentTimeMillis() - 60L * 60 * 1000;
+        for (File f : all) {
+            if (!f.isFile() || !f.getName().endsWith(".tmp")) continue;
+            if (f.lastModified() < cutoff) f.delete();
+        }
+    }
+
     /** 上限を超えていたら、古い完成済みキャッシュから消して上限の8割にする。 */
     static synchronized void pruneNow() {
         try {
+            deleteStaleTemp();
             File[] all = dir == null ? null : dir.listFiles();
             if (all == null) return;
             long limit = Prefs.limitMb(app) * 1024L * 1024L;

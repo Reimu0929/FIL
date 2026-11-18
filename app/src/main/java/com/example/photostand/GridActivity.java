@@ -31,11 +31,13 @@ public class GridActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private final ExecutorService ex = Executors.newFixedThreadPool(3);     // 画面に見えている分
     private final ExecutorService exPre = Executors.newSingleThreadExecutor(); // 先読み
+    private final ExecutorService exQuery = Executors.newSingleThreadExecutor(); // MediaStore クエリ
     private final Set<Integer> queued = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private String bucket, name;
-    private int tier, lastFirst = -1;
+    private volatile int tier, lastFirst = -1;
     private volatile int lo, hi = -1;
+    private volatile int queryToken;
     private float pages = 1f;
     private boolean showCount;
     private GridView grid;
@@ -57,10 +59,7 @@ public class GridActivity extends Activity {
         tier = ThumbCache.tier(this);
         bucket = getIntent().getStringExtra("bucket");
         name = getIntent().getStringExtra("name");
-        items = Photos.load(getContentResolver(), bucket);
-        if (items.isEmpty()) { finish(); return; }
-        setTitle(name + "  (" + items.size() + ")");
-        if (Prefs.preloadAll(this) == 2) ViewPreloader.startFolder(this, bucket);
+        // 写真一覧のクエリは裏スレッドで行う(写真が多いとメインでやると ANR 級)。
 
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
@@ -119,10 +118,28 @@ public class GridActivity extends Activity {
         root.addView(grid, new LinearLayout.LayoutParams(-1, 0, 1f));
         setContentView(root);
         applySize();
+        loadItems();
     }
 
-    @Override protected void onResume() {
-        super.onResume();
+    /** 一覧を裏で読み込み、結果が出てからタイトル・先読み・表示を更新する。 */
+    private void loadItems() {
+        final int my = ++queryToken;
+        exQuery.execute(() -> {
+            final ArrayList<Photos.Item> loaded = Photos.load(getContentResolver(), bucket);
+            h.post(() -> {
+                if (my != queryToken || isFinishing() || isDestroyed()) return;
+                items = loaded;
+                if (items.isEmpty()) { finish(); return; }
+                setTitle(name + "  (" + items.size() + ")");
+                if (Prefs.preloadAll(this) == 2) ViewPreloader.startFolder(this, bucket);
+                adapter.notifyDataSetChanged();
+                startStatAndPrefetch();
+            });
+        });
+    }
+
+    /** カウンタ表示と先読みを開始する(一覧読み込み完了後 / onResume の両方から呼ぶ)。 */
+    private void startStatAndPrefetch() {
         if (items.isEmpty()) return;
         pages = Prefs.pages(this);
         showCount = Prefs.showCount(this);
@@ -138,14 +155,21 @@ public class GridActivity extends Activity {
         });
     }
 
+    @Override protected void onResume() {
+        super.onResume();
+        startStatAndPrefetch();
+    }
+
     @Override protected void onPause() {
         h.removeCallbacks(statTick);
         super.onPause();
     }
 
     @Override protected void onDestroy() {
+        queryToken++;
         ex.shutdownNow();
         exPre.shutdownNow();
+        exQuery.shutdownNow();
         h.removeCallbacksAndMessages(null);
         super.onDestroy();
     }

@@ -40,25 +40,30 @@ public class SettingsActivity extends Activity {
     private Switch regenerate;
     private int pollCount, memoryTick;
     private volatile boolean infoRunning;
+    private volatile boolean destroyed;
+    private static final long POLL_BUSY_MS = 500;
+    private static final long POLL_IDLE_MS = 2000;
 
     private final Runnable poll = new Runnable() {
         @Override public void run() {
+            boolean busy = CacheJob.running || ViewPreloader.running;
             updateJobButtons();
             jobStatus.setText(CacheJob.status());
             preloadStatus.setText(ViewPreloader.status());
-            if (++memoryTick % 4 == 0) updateMemoryInfo();
-            boolean busy = CacheJob.running || ViewPreloader.running;
             if (busy) {
                 getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
+                if (++memoryTick % 4 == 0) updateMemoryInfo();   // 約2秒毎
                 if (++pollCount % 6 == 0) refreshInfo();
             } else {
                 getWindow().clearFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
                 if (pollCount != 0) {
                     pollCount = 0;
+                    memoryTick = 0;
+                    updateMemoryInfo();
                     refreshInfo();
                 }
             }
-            h.postDelayed(this, 500);
+            h.postDelayed(this, busy ? POLL_BUSY_MS : POLL_IDLE_MS);
         }
     };
 
@@ -207,6 +212,12 @@ public class SettingsActivity extends Activity {
         super.onPause();
     }
 
+    @Override protected void onDestroy() {
+        destroyed = true;
+        h.removeCallbacksAndMessages(null);
+        super.onDestroy();
+    }
+
     private void updateJobButtons() {
         if (jobBtn == null || preloadBtn == null || regenerate == null) return;
         boolean all = regenerate.isChecked();
@@ -237,21 +248,30 @@ public class SettingsActivity extends Activity {
                         + "\n  (1枚の写真につき小・中・大の最大3ファイル)"
                         + "\n全画面用: " + st.viewFiles + " ファイル / " + mb(st.viewBytes)
                         + "\n合計: " + st.totalFiles() + " ファイル / " + mb(st.totalBytes());
-                h.post(() -> cacheInfo.setText(text));
+                h.post(() -> {
+                    if (destroyed || isFinishing()) return;
+                    cacheInfo.setText(text);
+                });
             } finally {
                 infoRunning = false;
             }
         }).start();
     }
 
+    /** Debug.getMemoryInfo は binder IPC なので裏スレッドで取得し、表示だけメインで行う。 */
     private void updateMemoryInfo() {
-        if (memoryInfo == null) return;
-        Debug.MemoryInfo mi = new Debug.MemoryInfo();
-        Debug.getMemoryInfo(mi);
-        long appBytes = mi.getTotalPss() * 1024L;
-        memoryInfo.setText("アプリ全体(概算・全画面用も含む): " + mb(appBytes)
-                + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
-                + mb(ThumbCache.memBytes()));
+        if (memoryInfo == null || destroyed) return;
+        new Thread(() -> {
+            Debug.MemoryInfo mi = new Debug.MemoryInfo();
+            Debug.getMemoryInfo(mi);
+            final String text = "アプリ全体(概算・全画面用も含む): " + mb(mi.getTotalPss() * 1024L)
+                    + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
+                    + mb(ThumbCache.memBytes());
+            h.post(() -> {
+                if (destroyed || isFinishing() || memoryInfo == null) return;
+                memoryInfo.setText(text);
+            });
+        }).start();
     }
 
     private static String mb(long bytes) {

@@ -76,6 +76,7 @@ public class ZoomImageView extends ImageView {
                     longPressed = false;
                     return true;
                 }
+                performClick();   // アクセシビリティ/click listener のための通知
                 if (isZoomed()) resetFit();
                 else if (listener != null) listener.onTap(e.getX(), getWidth());
                 return true;

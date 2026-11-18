@@ -20,6 +20,8 @@ final class ViewPreloader {
     static volatile String message = "未実行";
     private static volatile long startMs;
     private static boolean startupStarted;
+    /** 別ジョブ実行中に来たフォルダ要求を保留する。 */
+    private static volatile String pendingBucket;
 
     private static int targetPx(Context c) {
         DisplayMetrics dm = c.getResources().getDisplayMetrics();
@@ -33,8 +35,13 @@ final class ViewPreloader {
         start(ctx, null, false);
     }
 
-    /** 指定フォルダの未作成キャッシュを自動生成する。 */
-    static void startFolder(Context ctx, String bucket) {
+    /** 指定フォルダの未作成キャッシュを自動生成する。他ジョブ中なら完了後に実行する。 */
+    static synchronized void startFolder(Context ctx, String bucket) {
+        if (running) {
+            pendingBucket = bucket;
+            return;
+        }
+        pendingBucket = null;
         start(ctx, bucket, false);
     }
 
@@ -85,12 +92,21 @@ final class ViewPreloader {
             } finally {
                 running = false;
                 ThumbCache.pruneNow();
+                String next;
+                synchronized (ViewPreloader.class) {
+                    next = pendingBucket;
+                    pendingBucket = null;
+                }
+                if (next != null) start(ctx.getApplicationContext(), next, false);
             }
         }).start();
     }
 
     static void stop() {
         cancel = true;
+        synchronized (ViewPreloader.class) {
+            pendingBucket = null;
+        }
     }
 
     static String status() {

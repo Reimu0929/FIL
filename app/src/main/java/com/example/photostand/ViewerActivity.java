@@ -20,6 +20,7 @@ import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -32,13 +33,21 @@ public class ViewerActivity extends Activity {
     private final Handler h = new Handler(Looper.getMainLooper());
     private final ExecutorService exCur = Executors.newSingleThreadExecutor();
     private final ExecutorService exPre = Executors.newSingleThreadExecutor();
+    private final ExecutorService exQuery = Executors.newSingleThreadExecutor();   // MediaStore クエリ
+    private final ExecutorService exHi = Executors.newSingleThreadExecutor();      // 拡大用の高解像度デコード
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private LruCache<Integer, Bitmap> cache;
     private ZoomImageView iv;
     private TextView info, stat;
     private final Set<Integer> preloaded = new HashSet<>();
+    /** LruCache.snapshot() のコピーなしでキーを追跡する。 */
+    private final Set<Integer> cachedKeys = ConcurrentHashMap.newKeySet();
+    /** 同じ idx の先読みタスクを積まないためのキュー。 */
+    private final Set<Integer> prefetchQueued = ConcurrentHashMap.newKeySet();
     private String title;
-    private int index, token, target, thumbPx, preload, preloadTotal;
+    private volatile int index, token, target, thumbPx, preload, preloadTotal;
+    private volatile int queryToken;
+    private int maxBitmapBytes;
     private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
@@ -54,14 +63,16 @@ public class ViewerActivity extends Activity {
 
         String bucket = getIntent().getStringExtra("bucket");
         title = getIntent().getStringExtra("name");
-        items = Photos.load(getContentResolver(), bucket);
-        if (items.isEmpty()) { finish(); return; }
+        // 写真一覧のクエリは裏スレッドで行う(メインだと数千枚で ANR 級)。
 
         DisplayMetrics dm = getResources().getDisplayMetrics();
         target = Math.max(dm.widthPixels, dm.heightPixels);
-        cache = new LruCache<Integer, Bitmap>(Math.max(8 << 20, (int) (Runtime.getRuntime().maxMemory() / 6))) {
+        cache = new LruCache<Integer, Bitmap>(initialRamLimit()) {
             @Override protected int sizeOf(Integer key, Bitmap value) {
                 return value.getByteCount();
+            }
+            @Override protected void entryRemoved(boolean evicted, Integer key, Bitmap oldValue, Bitmap newValue) {
+                cachedKeys.remove(key);
             }
         };
 
@@ -96,9 +107,47 @@ public class ViewerActivity extends Activity {
         stat.setVisibility(showCount ? View.VISIBLE : View.GONE);
         root.addView(stat, new FrameLayout.LayoutParams(-2, -2, Gravity.TOP | Gravity.END));
         setContentView(root);
+        loadItems(bucket);
+    }
 
-        index = Math.max(0, Math.min(getIntent().getIntExtra("start", 0), items.size() - 1));
-        show();
+    /** RAM上限を先読み枚数ベースにする。画質(追加縮小なし)は維持したまま上限だけ見直す。 */
+    private int ramLimitFor(long bytesPerImage) {
+        int slots = Math.max(3, preload * 2 + 1);          // 現在の1枚＋左右 preload 枚
+        long want = bytesPerImage * slots;
+        long cap = Runtime.getRuntime().maxMemory() / 2L;  // OOM 回避の安全上限
+        return (int) Math.max(16L << 20, Math.min(want, cap));
+    }
+
+    private int initialRamLimit() {
+        // 実測前は画面長辺のデコード画像を見積もる。
+        return ramLimitFor((long) target * target * 4L);
+    }
+
+    /** 実測した1枚のサイズが大きくなったときだけ上限を引き上げる。 */
+    private void noteBitmapSize(int bytes) {
+        if (bytes <= maxBitmapBytes) return;
+        maxBitmapBytes = bytes;
+        cache.resize(ramLimitFor(bytes));
+    }
+
+    private void cachePut(int idx, Bitmap b) {
+        cache.put(idx, b);
+        cachedKeys.add(idx);
+    }
+
+    /** 一覧を裏で読み込み、終わってから最初の画像を表示する。 */
+    private void loadItems(final String bucket) {
+        final int my = ++queryToken;
+        exQuery.execute(() -> {
+            final ArrayList<Photos.Item> loaded = Photos.load(getContentResolver(), bucket);
+            h.post(() -> {
+                if (my != queryToken || isFinishing() || isDestroyed()) return;
+                items = loaded;
+                if (items.isEmpty()) { finish(); return; }
+                index = Math.max(0, Math.min(getIntent().getIntExtra("start", 0), items.size() - 1));
+                show();
+            });
+        });
     }
 
     @Override public void onWindowFocusChanged(boolean focus) {
@@ -116,9 +165,12 @@ public class ViewerActivity extends Activity {
 
     @Override protected void onDestroy() {
         token++;
+        queryToken++;
         h.removeCallbacksAndMessages(null);
         exCur.shutdownNow();
         exPre.shutdownNow();
+        exQuery.shutdownNow();
+        exHi.shutdownNow();
         if (cache != null) cache.evictAll();
         super.onDestroy();
     }
@@ -163,7 +215,8 @@ public class ViewerActivity extends Activity {
                 });
                 return;
             }
-            cache.put(idx, b);
+            noteBitmapSize(b.getByteCount());
+            cachePut(idx, b);
             h.post(() -> {
                 if (my != token) return;
                 iv.setImageFit(b);
@@ -176,7 +229,7 @@ public class ViewerActivity extends Activity {
     /** 先読みの範囲(現在位置から左右 preload 枚)の外にある画像を、メモリから外す。 */
     private void trimWindow() {
         int n = items.size();
-        for (Integer k : cache.snapshot().keySet()) {
+        for (Integer k : new ArrayList<>(cachedKeys)) {
             int d = Math.abs(k - index);
             d = Math.min(d, n - d);
             if (d > preload) cache.remove(k);
@@ -189,7 +242,6 @@ public class ViewerActivity extends Activity {
      */
     private void prefetch() {
         final int n = items.size();
-        final int my = token;
         Set<Integer> wanted = new LinkedHashSet<>();
         for (int k = 1; k <= preload && k < n; k++) {
             wanted.add((index + k) % n);
@@ -200,34 +252,37 @@ public class ViewerActivity extends Activity {
         preloadTotal = wanted.size();
         for (Integer idx : wanted) {
             if (cache.get(idx) != null) preloaded.add(idx);
-            else queuePrefetch(idx, my);
+            else queuePrefetch(idx);
         }
         updateStat();
     }
 
-    private void queuePrefetch(final int idx, final int my) {
-        if (idx == index) return;
+    /** 同じ idx は同時に1つだけキューする(show() ごとの再投入でタスクが積もらないように)。 */
+    private void queuePrefetch(final int idx) {
+        if (idx == index || !prefetchQueued.add(idx)) return;
         exPre.execute(() -> {
-            if (my != token) return;
-            if (cache.get(idx) == null) {
-                if (cache.size() < cache.maxSize()) {
+            final int my = token;
+            try {
+                if (cache.get(idx) == null) {
                     Bitmap b = ViewCache.get(items.get(idx), target);
                     if (b == null) return;
+                    noteBitmapSize(b.getByteCount());
                     if (my != token) {
                         b.recycle();
                         return;
                     }
                     if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
-                        cache.put(idx, b);
+                        cachePut(idx, b);
                     } else {
                         // get() がディスクへ保存済みなので、RAMに入らなくても先読みは完了している。
                         b.recycle();
                     }
-                } else {
-                    ViewCache.ensure(items.get(idx), target);
                 }
+                // 完了時点の token で表示を更新する(待機中に切り替わっていても最新の状態を反映)。
+                markPreloaded(idx, token);
+            } finally {
+                prefetchQueued.remove(idx);
             }
-            markPreloaded(idx, my);
         });
     }
 
@@ -245,19 +300,20 @@ public class ViewerActivity extends Activity {
         if (!showCount) return;
         stat.setText("先読み(RAM/ディスク): " + preloaded.size() + " / " + preloadTotal
                 + " 枚(左右" + preload + "枚)"
-                + "\nRAM: " + cache.snapshot().size() + " 枚 / "
+                + "\nRAM: " + cache.size() + " 枚 / "
                 + String.format("%.1f MB", cache.size() / 1048576.0));
     }
 
     /** 拡大し始めたら、より細かい画像を読み込んで差し替える。 */
     private void loadHi(final int idx) {
         final int my = token;
-        exCur.execute(() -> {
+        exHi.execute(() -> {
             if (my != token) return;
             Bitmap b = decodeHi(items.get(idx));
             if (b == null) return;
             h.post(() -> {
                 if (my == token) iv.setImageKeepView(b);
+                else b.recycle();   // 表示が切り替わっていたら解放する
             });
         });
     }

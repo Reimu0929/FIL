@@ -7,6 +7,8 @@ import android.content.pm.PackageManager;
 import android.database.Cursor;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.provider.MediaStore;
 import android.view.Gravity;
 import android.view.Menu;
@@ -20,6 +22,8 @@ import android.widget.TextView;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.Map;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
 
 /** フォルダ一覧。タップするとそのフォルダの写真をタイルで一覧表示する。右上の3ドットから設定へ。 */
 public class MainActivity extends Activity {
@@ -29,6 +33,9 @@ public class MainActivity extends Activity {
     private ArrayAdapter<String> adapter;
     private TextView empty;
     private boolean asked;
+    private final Handler h = new Handler(Looper.getMainLooper());
+    private final ExecutorService ex = Executors.newSingleThreadExecutor();
+    private volatile int loadToken;
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -86,12 +93,14 @@ public class MainActivity extends Activity {
     }
 
     @Override public void onRequestPermissionsResult(int code, String[] perms, int[] results) {
-        if (granted()) {
-            load();
-            maybeStartupPreload();
-        } else {
-            empty.setText("写真へのアクセスを許可してください");
-        }
+        // 許可された直後は onResume が続くので、そこでの1回の load() に任せる。
+        if (!granted()) empty.setText("写真へのアクセスを許可してください");
+    }
+
+    @Override protected void onDestroy() {
+        ex.shutdownNow();
+        h.removeCallbacksAndMessages(null);
+        super.onDestroy();
     }
 
     /** 設定が「アプリ起動時」なら、起動後に一度だけ全画面用ディスクキャッシュを作る。 */
@@ -104,35 +113,48 @@ public class MainActivity extends Activity {
             || checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED;
     }
 
+    /** MediaStore の全画像クエリは裏スレッドで行い、結果だけをUIスレッドへ反映する。 */
     private void load() {
-        ids.clear(); names.clear(); labels.clear();
-        LinkedHashMap<String, Integer> count = new LinkedHashMap<>();
-        LinkedHashMap<String, String> nm = new LinkedHashMap<>();
-        try (Cursor c = getContentResolver().query(
-                MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
-                new String[]{MediaStore.Images.Media.BUCKET_ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME},
-                null, null, MediaStore.Images.Media.BUCKET_DISPLAY_NAME + " ASC")) {
-            if (c != null) {
-                while (c.moveToNext()) {
-                    String id = c.getString(0);
-                    if (id == null) continue;
-                    Integer n = count.get(id);
-                    count.put(id, n == null ? 1 : n + 1);
-                    if (!nm.containsKey(id)) {
-                        String name = c.getString(1);
-                        nm.put(id, name == null ? "(名称なし)" : name);
+        final int my = ++loadToken;
+        ex.execute(() -> {
+            final ArrayList<String> foundIds = new ArrayList<>();
+            final ArrayList<String> foundNames = new ArrayList<>();
+            final ArrayList<String> foundLabels = new ArrayList<>();
+            LinkedHashMap<String, Integer> count = new LinkedHashMap<>();
+            LinkedHashMap<String, String> nm = new LinkedHashMap<>();
+            try (Cursor c = getContentResolver().query(
+                    MediaStore.Images.Media.EXTERNAL_CONTENT_URI,
+                    new String[]{MediaStore.Images.Media.BUCKET_ID, MediaStore.Images.Media.BUCKET_DISPLAY_NAME},
+                    null, null, MediaStore.Images.Media.BUCKET_DISPLAY_NAME + " ASC")) {
+                if (c != null) {
+                    while (c.moveToNext()) {
+                        String id = c.getString(0);
+                        if (id == null) continue;
+                        Integer n = count.get(id);
+                        count.put(id, n == null ? 1 : n + 1);
+                        if (!nm.containsKey(id)) {
+                            String name = c.getString(1);
+                            nm.put(id, name == null ? "(名称なし)" : name);
+                        }
                     }
                 }
+            } catch (Exception ignored) {
             }
-        } catch (Exception ignored) {
-        }
-        for (Map.Entry<String, Integer> en : count.entrySet()) {
-            String name = nm.get(en.getKey());
-            ids.add(en.getKey());
-            names.add(name);
-            labels.add(name + "  (" + en.getValue() + ")");
-        }
-        adapter.notifyDataSetChanged();
+            for (Map.Entry<String, Integer> en : count.entrySet()) {
+                String name = nm.get(en.getKey());
+                foundIds.add(en.getKey());
+                foundNames.add(name);
+                foundLabels.add(name + "  (" + en.getValue() + ")");
+            }
+            h.post(() -> {
+                if (my != loadToken || isFinishing() || isDestroyed()) return;
+                ids.clear(); names.clear(); labels.clear();
+                ids.addAll(foundIds);
+                names.addAll(foundNames);
+                labels.addAll(foundLabels);
+                adapter.notifyDataSetChanged();
+            });
+        });
     }
 
     private int dp(int v) {
