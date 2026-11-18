@@ -194,10 +194,11 @@ public class ViewerActivity extends Activity {
         final int my = ++token;
         final int idx = index;
         trimWindow();
+        // 現在画像のデコードを待たずに、隣の先読みを並走させる(連続移動で詰まらないように)。
+        prefetch();
         Bitmap ready = cache.get(idx);
         if (ready != null) {
             iv.setImageFit(ready);
-            prefetch();
             updateStat();
             return;
         }
