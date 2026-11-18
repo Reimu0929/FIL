@@ -262,21 +262,18 @@ public class ViewerActivity extends Activity {
     private void queuePrefetch(final int idx) {
         if (idx == index || !prefetchQueued.add(idx)) return;
         exPre.execute(() -> {
-            final int my = token;
             try {
                 if (cache.get(idx) == null) {
                     Bitmap b = ViewCache.get(items.get(idx), target);
                     if (b == null) return;
                     noteBitmapSize(b.getByteCount());
-                    if (my != token) {
-                        // ViewCache.get() は single-flight で本表示側にも同じ Bitmap を渡している。
-                        // recycle() すると表示中の画像が黒くなるので、参照を捨てるだけにする。
-                        return;
-                    }
+                    // token が変わっていてもデコード結果は idx に紐づくので捨てない。
+                    // ここで破棄すると移動のたびに先読みが無駄になり、バッファが補充されない。
+                    // (ViewCache.get() は single-flight で他スレッドにも同じ Bitmap を渡すため recycle() はしない)
                     if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
                         cachePut(idx, b);
                     }
-                    // RAM に入らない場合も recycle() しない(同上)。ディスクには保存済み。
+                    // RAM に入らない場合も参照を捨てるだけ。ディスクには保存済み。
                 }
                 // 完了時点の token で表示を更新する(待機中に切り替わっていても最新の状態を反映)。
                 markPreloaded(idx, token);
@@ -288,6 +285,11 @@ public class ViewerActivity extends Activity {
 
     private void markPreloaded(final int idx, final int my) {
         if (!showCount) return;
+        // 現在の先読み範囲外の結果が遅れて来てもカウントしない。
+        int n = items.size();
+        int d = Math.abs(idx - index);
+        d = Math.min(d, n - d);
+        if (idx == index || d > preload) return;
         final boolean ready = cache.get(idx) != null || ViewCache.has(items.get(idx), target);
         h.post(() -> {
             if (my != token || !ready) return;
@@ -300,7 +302,7 @@ public class ViewerActivity extends Activity {
         if (!showCount) return;
         stat.setText("先読み(RAM/ディスク): " + preloaded.size() + " / " + preloadTotal
                 + " 枚(左右" + preload + "枚)"
-                + "\nRAM: " + cache.size() + " 枚 / "
+                + "\nRAM: " + cachedKeys.size() + " 枚 / "
                 + String.format("%.1f MB", cache.size() / 1048576.0));
     }
 
