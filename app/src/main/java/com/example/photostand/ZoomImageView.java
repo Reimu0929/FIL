@@ -96,6 +96,12 @@ public class ZoomImageView extends ImageView {
         resetFit();
     }
 
+    /** 次の画像を読み込む間も前画像を表示したまま、拡大・移動状態だけを初期化する。 */
+    void resetView() {
+        zoomNotified = false;
+        resetFit();
+    }
+
     /** 高解像度の画像に差し替える。今の拡大・位置はそのまま保つ。 */
     void setImageKeepView(Bitmap nb) {
         Drawable d = getDrawable();

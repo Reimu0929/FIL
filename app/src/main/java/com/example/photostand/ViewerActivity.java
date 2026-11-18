@@ -17,6 +17,9 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.LinkedHashSet;
+import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
@@ -33,8 +36,9 @@ public class ViewerActivity extends Activity {
     private LruCache<Integer, Bitmap> cache;
     private ZoomImageView iv;
     private TextView info, stat;
+    private final Set<Integer> preloaded = new HashSet<>();
     private String title;
-    private int index, token, target, thumbPx, preload;
+    private int index, token, target, thumbPx, preload, preloadTotal;
     private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
@@ -145,8 +149,11 @@ public class ViewerActivity extends Activity {
             updateStat();
             return;
         }
+        // 前画像の拡大・移動状態を残さないようにしてから、次の全画面画像を読み込む。
+        iv.resetView();
         Bitmap thumb = ThumbCache.memGet(items.get(idx), thumbPx);
-        if (thumb != null) iv.setImageFit(thumb);
+        // 移動中に低解像度サムネイルへ差し替えると画像が荒く見えるため、前の全画面画像を保つ。
+        if (thumb != null && iv.getDrawable() == null) iv.setImageFit(thumb);
         exCur.execute(() -> {
             if (my != token) return;
             Bitmap b = ViewCache.get(items.get(idx), target);
@@ -178,44 +185,68 @@ public class ViewerActivity extends Activity {
 
     /**
      * 前後の写真を近い順に裏で準備する。
-     * メモリに入りきる分はメモリへ、残りは画面サイズのディスクキャッシュへ保存する。
+     * すべてをディスクへ準備し、RAMにはバイト上限の範囲で保持する。
      */
     private void prefetch() {
         final int n = items.size();
         final int my = token;
+        Set<Integer> wanted = new LinkedHashSet<>();
         for (int k = 1; k <= preload && k < n; k++) {
-            queuePrefetch((index + k) % n, my);
-            queuePrefetch(((index - k) % n + n) % n, my);
+            wanted.add((index + k) % n);
+            wanted.add(((index - k) % n + n) % n);
         }
+        wanted.remove(index);
+        preloaded.clear();
+        preloadTotal = wanted.size();
+        for (Integer idx : wanted) {
+            if (cache.get(idx) != null) preloaded.add(idx);
+            else queuePrefetch(idx, my);
+        }
+        updateStat();
     }
 
     private void queuePrefetch(final int idx, final int my) {
-        if (idx == index || cache.get(idx) != null) return;
+        if (idx == index) return;
         exPre.execute(() -> {
-            if (my != token || cache.get(idx) != null) return;
-            if (cache.size() < cache.maxSize()) {
-                Bitmap b = ViewCache.get(items.get(idx), target);
-                if (b == null || my != token) {
-                    if (b != null) b.recycle();
-                    return;
-                }
-                if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
-                    cache.put(idx, b);
+            if (my != token) return;
+            if (cache.get(idx) == null) {
+                if (cache.size() < cache.maxSize()) {
+                    Bitmap b = ViewCache.get(items.get(idx), target);
+                    if (b == null) return;
+                    if (my != token) {
+                        b.recycle();
+                        return;
+                    }
+                    if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
+                        cache.put(idx, b);
+                    } else {
+                        // get() がディスクへ保存済みなので、RAMに入らなくても先読みは完了している。
+                        b.recycle();
+                    }
                 } else {
-                    b.recycle();
+                    ViewCache.ensure(items.get(idx), target);
                 }
-            } else {
-                ViewCache.ensure(items.get(idx), target);
             }
-            if (showCount) h.post(this::updateStat);
+            markPreloaded(idx, my);
+        });
+    }
+
+    private void markPreloaded(final int idx, final int my) {
+        if (!showCount) return;
+        final boolean ready = cache.get(idx) != null || ViewCache.has(items.get(idx), target);
+        h.post(() -> {
+            if (my != token || !ready) return;
+            preloaded.add(idx);
+            updateStat();
         });
     }
 
     private void updateStat() {
         if (!showCount) return;
-        stat.setText("全画面のRAMキャッシュ: " + cache.snapshot().size() + " 枚 / "
-                + String.format("%.1f MB", cache.size() / 1048576.0)
-                + "\n先読み範囲: 左右" + preload + "枚");
+        stat.setText("先読み(RAM/ディスク): " + preloaded.size() + " / " + preloadTotal
+                + " 枚(左右" + preload + "枚)"
+                + "\nRAM: " + cache.snapshot().size() + " 枚 / "
+                + String.format("%.1f MB", cache.size() / 1048576.0));
     }
 
     /** 拡大し始めたら、より細かい画像を読み込んで差し替える。 */

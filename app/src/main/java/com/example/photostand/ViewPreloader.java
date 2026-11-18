@@ -45,6 +45,7 @@ final class ViewPreloader {
 
     private static synchronized void start(Context ctx, String bucket, final boolean regenerateAll) {
         if (running) return;
+        ViewCache.init(ctx.getApplicationContext());
         running = true;
         cancel = false;
         total = 0;

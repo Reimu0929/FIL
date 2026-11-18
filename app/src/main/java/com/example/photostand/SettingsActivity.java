@@ -164,7 +164,7 @@ public class SettingsActivity extends Activity {
         preloadStatus.setPadding(0, dp(4), 0, dp(8));
         root.addView(preloadStatus);
 
-        section(root, "表示時の先読み(RAM)");
+        section(root, "表示時の先読み(ディスク＋RAM)");
         preloadV = row(root, "全画面で先読みする前後の枚数", v -> choose("全画面で先読みする前後の枚数", PRELOAD_LABELS,
                 indexOf(PRELOADS, Prefs.preload(this)), i -> {
                     Prefs.sp(this).edit().putInt("preload", PRELOADS[i]).apply();
@@ -219,7 +219,8 @@ public class SettingsActivity extends Activity {
     private void showValues() {
         limitV.setText(LIMIT_LABELS[indexOf(LIMITS, Prefs.limitMb(this))] + "(超えたら古いものから削除)");
         preloadV.setText(PRELOAD_LABELS[indexOf(PRELOADS, Prefs.preload(this))]
-                + "(最大 " + Prefs.PRELOAD_MAX + " 枚。上限内でRAMに保持します)");
+                + "(左右それぞれ最大 " + Prefs.PRELOAD_MAX + " 枚、合計最大 " + (Prefs.PRELOAD_MAX * 2)
+                + " 枚。ディスクへ準備し、RAMには上限内で保持します)");
         pagesV.setText(PAGE_LABELS[indexOf(PAGES, Prefs.pages(this))] + "(画面の外のサムネイルを先に作ります)");
         preloadAllV.setText(PRELOAD_ALL_LABELS[indexOf(PRELOAD_ALL, Prefs.preloadAll(this))]);
     }

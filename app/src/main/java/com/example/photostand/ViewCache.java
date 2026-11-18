@@ -16,15 +16,33 @@ import java.util.UUID;
 final class ViewCache {
     private ViewCache() {}
 
+    private static boolean legacyCleanupStarted;
+
     static synchronized void init(Context c) {
         ThumbCache.init(c.getApplicationContext());
+        if (legacyCleanupStarted) return;
+        legacyCleanupStarted = true;
+        new Thread(ViewCache::deleteLegacyCache).start();
     }
 
     private static File fileFor(Photos.Item it, int px) {
         File d = ThumbCache.dir();
         if (d == null) return null;
-        String key = it.path + "|" + it.size + "|" + it.modified + "|v" + px;
-        return new File(d, "v" + ThumbCache.sha1(key) + ".jpg");
+        // v1 には画面長辺まで縮小した低解像度キャッシュが混在するため、v2 へ移行する。
+        String key = it.path + "|" + it.size + "|" + it.modified + "|v2|" + px;
+        return new File(d, "v2" + ThumbCache.sha1(key) + ".jpg");
+    }
+
+    /** 旧形式v1の全画面キャッシュを削除する。v2 とは名前が違うため並行生成してよい。 */
+    private static void deleteLegacyCache() {
+        File d = ThumbCache.dir();
+        File[] fs = d == null ? null : d.listFiles();
+        if (fs == null) return;
+        for (File f : fs) {
+            String name = f.getName();
+            // v1 は "v" + 40桁のSHA-1 + ".jpg"。先頭が v2 の旧ファイルも確実に削除する。
+            if (name.matches("v[0-9a-f]{40}\\.jpg")) f.delete();
+        }
     }
 
     static boolean has(Photos.Item it, int px) {
@@ -80,16 +98,7 @@ final class ViewCache {
                 if (r != b) b.recycle();
                 b = r;
             }
-            // inSampleSize だけでは画面長辺の約2倍が残ることがあるため、必ず画面サイズまで縮小する。
-            int decodedBig = Math.max(b.getWidth(), b.getHeight());
-            if (decodedBig > px) {
-                float scale = (float) px / decodedBig;
-                Bitmap r = Bitmap.createScaledBitmap(b,
-                        Math.max(1, Math.round(b.getWidth() * scale)),
-                        Math.max(1, Math.round(b.getHeight() * scale)), true);
-                if (r != b) b.recycle();
-                b = r;
-            }
+            // 画面長辺への追加縮小は行わず、サンプリング後の解像度を保持して画質を優先する。
             return b;
         } catch (Throwable t) {
             return null;
