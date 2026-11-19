@@ -11,15 +11,15 @@ final class Photos {
     private Photos() {}
 
     static final class Item {
-        final String name, path;
+        final String name, path, bucket;
         final int rot;
-        final long size, modified;
-        Item(String name, String path, int rot, long size, long modified) {
+        final long size;
+        Item(String name, String path, int rot, long size, String bucket) {
             this.name = name;
             this.path = path;
             this.rot = rot;
             this.size = size;
-            this.modified = modified;
+            this.bucket = bucket;
         }
     }
 
@@ -28,39 +28,47 @@ final class Photos {
             MediaStore.Images.Media.DATA,
             MediaStore.Images.Media.ORIENTATION,
             MediaStore.Images.Media.SIZE,
-            MediaStore.Images.Media.DATE_MODIFIED};
+            MediaStore.Images.Media.BUCKET_ID};
 
-    private static void fill(ContentResolver cr, String selection, String[] args, ArrayList<Item> out) {
-        try (Cursor c = cr.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, COLS, selection, args, null)) {
-            if (c != null) {
-                while (c.moveToNext()) {
-                    String path = c.getString(1);
-                    if (path == null) continue;
-                    String name = c.getString(0);
-                    out.add(new Item(name == null ? path : name, path, c.getInt(2), c.getLong(3), c.getLong(4)));
-                }
-            }
-        } catch (Exception ignored) {
-        }
+    static Cursor query(ContentResolver cr, String bucket) {
+        String selection = bucket == null ? null : MediaStore.Images.Media.BUCKET_ID + "=?";
+        String[] args = bucket == null ? null : new String[]{bucket};
+        return cr.query(MediaStore.Images.Media.EXTERNAL_CONTENT_URI, COLS, selection, args, null);
     }
 
-    /** 全フォルダの写真(並べ替えなし)。キャッシュの一括生成用。 */
-    static ArrayList<Item> loadAll(ContentResolver cr) {
-        ArrayList<Item> out = new ArrayList<>();
-        fill(cr, null, null, out);
-        return out;
+    static Item read(Cursor cursor) {
+        String path = cursor.getString(1);
+        if (path == null) return null;
+        String name = cursor.getString(0);
+        return new Item(name == null ? path : name, path, cursor.getInt(2),
+                cursor.getLong(3), cursor.getString(4));
     }
 
     /** 1つのフォルダの写真をファイル名順で返す。 */
     static ArrayList<Item> load(ContentResolver cr, String bucket) {
         ArrayList<Item> out = new ArrayList<>();
-        fill(cr, MediaStore.Images.Media.BUCKET_ID + "=?", new String[]{bucket}, out);
+        try (Cursor cursor = query(cr, bucket)) {
+            while (cursor != null && cursor.moveToNext()) {
+                Item item = read(cursor);
+                if (item != null) out.add(item);
+            }
+        } catch (Exception ignored) {
+        }
         Collections.sort(out, (a, b) -> {
             int r = natural(a.name, b.name);
             if (r == 0) r = a.name.compareTo(b.name);
             return r != 0 ? r : a.path.compareTo(b.path);
         });
         return out;
+    }
+
+    static long estimatedBytes(ArrayList<Item> items) {
+        long bytes = 32L;
+        for (Item item : items) {
+            bytes += 128L + 2L * (item.name.length() + item.path.length()
+                    + (item.bucket == null ? 0 : item.bucket.length()));
+        }
+        return bytes;
     }
 
     private static boolean digit(char c) {

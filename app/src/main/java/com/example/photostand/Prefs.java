@@ -17,6 +17,22 @@ final class Prefs {
     /** サムネイルキャッシュの上限(MB) */
     static int limitMb(Context c) { return sp(c).getInt("limitMb", 300); }
 
+    static int ramOverrideMb(Context c) { return sp(c).getInt("ramOverrideMb", 0); }
+
+    static int maxRamOverrideMb() {
+        return (int) Math.min(Integer.MAX_VALUE >> 20, Runtime.getRuntime().maxMemory() >> 20);
+    }
+
+    static long ramLimitBytes(Context c) {
+        int mb = ramOverrideMb(c);
+        return mb > 0 ? (long) Math.min(mb, maxRamOverrideMb()) << 20
+                : Runtime.getRuntime().maxMemory() / 2L;
+    }
+
+    static boolean keepZoomBitmap(Context c) {
+        return sp(c).getBoolean("keepZoomBitmap", true);
+    }
+
     /** 全画面表示で先読みする枚数(左右それぞれ) */
     static int preload(Context c) {
         int n = sp(c).getInt("preload", 5);

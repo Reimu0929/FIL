@@ -34,6 +34,7 @@ public class GridActivity extends Activity {
     private final Set<String> queued = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private String bucket, name;
+    private long listBytes;
     private volatile int tier, lastFirst = -1;
     private volatile int lo, hi = -1;
     private volatile int queryToken;
@@ -119,9 +120,12 @@ public class GridActivity extends Activity {
         final int my = ++queryToken;
         exQuery.execute(() -> {
             final ArrayList<Photos.Item> loaded = Photos.load(getContentResolver(), bucket);
+            final long bytes = Photos.estimatedBytes(loaded);
             h.post(() -> {
                 if (my != queryToken || isFinishing() || isDestroyed()) return;
                 items = loaded;
+                RamBudget.replaceListBytes(listBytes, bytes);
+                listBytes = bytes;
                 if (items.isEmpty()) { finish(); return; }
                 setTitle(name + "  (" + items.size() + ")");
                 if (Prefs.preloadAll(this) == 2) ViewPreloader.startFolder(this, bucket);
@@ -150,6 +154,7 @@ public class GridActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        ThumbCache.setCurrentBucket(bucket);
         startStatAndPrefetch();
     }
 
@@ -164,6 +169,8 @@ public class GridActivity extends Activity {
         exPre.shutdownNow();
         exQuery.shutdownNow();
         h.removeCallbacksAndMessages(null);
+        RamBudget.replaceListBytes(listBytes, 0);
+        listBytes = 0;
         super.onDestroy();
     }
 

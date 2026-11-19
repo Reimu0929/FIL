@@ -2,7 +2,7 @@ package com.example.photostand;
 
 import android.content.ContentResolver;
 import android.content.Context;
-import java.util.ArrayList;
+import android.database.Cursor;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /** 全フォルダのサムネイル(大・中・小)をまとめて作る処理。画面を離れても続く。 */
@@ -26,11 +26,10 @@ final class CacheJob {
         message = "写真の一覧を取得中";
         final ContentResolver cr = ctx.getApplicationContext().getContentResolver();
         new Thread(() -> {
-            try {
-                final ArrayList<Photos.Item> all = Photos.loadAll(cr);
-                total = all.size();
+            try (Cursor photos = Photos.query(cr, null)) {
+                total = photos == null ? 0 : photos.getCount();
                 message = regenerateAll ? "サムネイルを再生成中" : "未作成のサムネイルを生成中";
-                Jobs.runWorkers(all, new AtomicInteger(), done, () -> cancel,
+                Jobs.runWorkers(photos, done, () -> cancel,
                         it -> ThumbCache.ensureAll(it, regenerateAll));
                 message = cancel ? "停止しました" : "完了";
             } catch (Throwable t) {

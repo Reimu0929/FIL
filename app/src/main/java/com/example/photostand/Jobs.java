@@ -1,7 +1,8 @@
 package com.example.photostand;
 
-import java.util.ArrayList;
+import android.database.Cursor;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /** CacheJob / ViewPreloader で共有する worker・経過時間・status の定型処理。 */
 final class Jobs {
@@ -16,32 +17,49 @@ final class Jobs {
         boolean get();
     }
 
-    /** 2本のワーカーで all を先頭から処理する。cancelled が真になったら途中で終了する。 */
-    static void runWorkers(ArrayList<Photos.Item> all, AtomicInteger next, AtomicInteger done,
-                           Cancelled cancelled, Processor p) {
-        Thread[] ws = new Thread[2];
-        for (int i = 0; i < ws.length; i++) {
-            ws[i] = new Thread(() -> {
+    /** 一覧を全件保持せず、2本のワーカーでカーソルから写真を1枚ずつ受け取る。 */
+    static void runWorkers(Cursor photos, AtomicInteger done, Cancelled cancelled, Processor p) {
+        if (photos == null) return;
+        AtomicReference<RuntimeException> queryError = new AtomicReference<>();
+        Thread[] workers = new Thread[2];
+        for (int i = 0; i < workers.length; i++) {
+            workers[i] = new Thread(() -> {
                 for (;;) {
-                    if (cancelled.get()) break;
-                    int n = next.getAndIncrement();
-                    if (n >= all.size()) break;
+                    Photos.Item item;
+                    synchronized (photos) {
+                        if (cancelled.get() || Thread.currentThread().isInterrupted() || queryError.get() != null) return;
+                        try {
+                            if (!photos.moveToNext()) return;
+                            item = Photos.read(photos);
+                        } catch (RuntimeException e) {
+                            queryError.set(e);
+                            return;
+                        }
+                    }
+                    if (item == null) continue;
                     try {
-                        p.process(all.get(n));
+                        p.process(item);
                     } catch (Throwable ignored) {
                     }
                     done.incrementAndGet();
                 }
             });
-            ws[i].start();
+            workers[i].start();
         }
-        for (Thread w : ws) {
-            try {
-                w.join();
-            } catch (InterruptedException e) {
-                Thread.currentThread().interrupt();
+        boolean interrupted = false;
+        for (Thread worker : workers) {
+            while (worker.isAlive()) {
+                try {
+                    worker.join();
+                } catch (InterruptedException e) {
+                    interrupted = true;
+                    for (Thread active : workers) active.interrupt();
+                }
             }
         }
+        if (interrupted) Thread.currentThread().interrupt();
+        RuntimeException error = queryError.get();
+        if (error != null) throw error;
     }
 
     static String elapsed(long startMs) {

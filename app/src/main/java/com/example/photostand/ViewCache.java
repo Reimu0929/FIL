@@ -2,7 +2,6 @@ package com.example.photostand;
 
 import android.content.Context;
 import android.graphics.Bitmap;
-import android.graphics.BitmapFactory;
 import java.io.File;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -28,9 +27,9 @@ final class ViewCache {
     private static File fileFor(Photos.Item it, int px) {
         File d = ThumbCache.fullDir();
         if (d == null) return null;
-        // v1 には画面長辺まで縮小した低解像度キャッシュが混在するため、v2 へ移行する。
-        String key = it.path + "|" + it.size + "|" + it.modified + "|v2|" + px;
-        return new File(d, "v2" + ThumbCache.sha1(key) + ".jpg");
+        // v3 は元画像の更新日時を使わない。
+        String key = it.path + "|" + it.size + "|v3|" + px;
+        return new File(d, "v3" + ThumbCache.sha1(key) + ".jpg");
     }
 
     static boolean has(Photos.Item it, int px) {
@@ -39,11 +38,11 @@ final class ViewCache {
     }
 
     /** ディスクにあれば読み込み、なければ作って保存する(裏のスレッドから呼ぶこと)。 */
-    static Bitmap get(Photos.Item it, int px) {
+    static Bitmap get(Photos.Item it, int px, int priority) {
         File f = fileFor(it, px);
         if (f == null) return null;
         String key = f.getAbsolutePath();
-        FutureTask<Bitmap> task = new FutureTask<>(() -> loadOrCreate(f, it, px));
+        FutureTask<Bitmap> task = new FutureTask<>(() -> loadOrCreate(f, it, px, priority));
         Future<Bitmap> pending = inFlight.putIfAbsent(key, task);
         if (pending == null) {
             pending = task;
@@ -61,15 +60,14 @@ final class ViewCache {
     }
 
     /** 同じパスの生成を1回だけ行う(single-flight の実体)。 */
-    private static Bitmap loadOrCreate(File f, Photos.Item it, int px) {
+    private static Bitmap loadOrCreate(File f, Photos.Item it, int px, int priority) {
         if (f.exists()) {
-            Bitmap b = BitmapFactory.decodeFile(f.getAbsolutePath());
+            Bitmap b = ThumbCache.decodeCached(f, priority);
             if (b != null) return b;
+            if (Thread.currentThread().isInterrupted()) return null;
             f.delete();
         }
-        Bitmap b = generate(it, px);
-        if (b != null) ThumbCache.writeJpeg(f, b);
-        return b;
+        return ThumbCache.generateForDisk(it, px, false, priority, f);
     }
 
     /** まだ無ければディスクに作る(メモリには残さない)。 */
@@ -83,25 +81,18 @@ final class ViewCache {
         if (f == null || (!regenerateAll && f.exists())) return;
         if (!regenerateAll) {
             // 通常は get() と同じ single-flight を使う。返る Bitmap は共有なので recycle しない。
-            get(it, px);
+            get(it, px, RamBudget.GENERATING);
             return;
         }
         // 全件再生成だけは既存ファイルも上書きするため専用の排他を使う。
         String key = f.getAbsolutePath();
         if (!ensureInFlight.add(key)) return;
         try {
-            Bitmap b = generate(it, px);
-            if (b == null) return;
-            ThumbCache.writeJpeg(f, b);   // 自前生成なので recycle してよい
-            b.recycle();
+            Bitmap b = ThumbCache.generateForDisk(it, px, false, RamBudget.GENERATING, f);
+            if (b != null) b.recycle();
         } finally {
             ensureInFlight.remove(key);
         }
-    }
-
-    private static Bitmap generate(Photos.Item it, int px) {
-        // 画面長辺への追加縮小は行わず、サンプリング後の解像度を保持して画質を優先する。
-        return ThumbCache.decodeScaled(it, px, false, 0f);
     }
 
 }

@@ -6,13 +6,16 @@ import android.graphics.BitmapFactory;
 import android.graphics.Matrix;
 import android.os.Environment;
 import android.system.Os;
-import android.util.LruCache;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Iterator;
+import java.util.LinkedHashMap;
+import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.UUID;
 import java.util.concurrent.ConcurrentHashMap;
@@ -32,14 +35,27 @@ final class ThumbCache {
     static final int[] TIER_DP = {110, 150, 220};
     static final String[] TIER_NAME = {"小", "中", "大"};
 
-    private static LruCache<String, Bitmap> mem;
+    // RAM キャッシュは RamBudget.LOCK で保護し、アクセス順に古いものから外す。
+    private static final LinkedHashMap<String, Thumbnail> mem = new LinkedHashMap<>(16, 0.75f, true);
+    private static long memBytes;
+    private static String currentBucket;
+    private static ViewerActivity viewer;
+    private static boolean initialized;
+
+    private static final class Thumbnail {
+        final String bucket;
+        final Bitmap bitmap;
+
+        Thumbnail(String bucket, Bitmap bitmap) {
+            this.bucket = bucket;
+            this.bitmap = bitmap;
+        }
+    }
     private static File dir;      // サムネイル用
     private static File fullDir;  // 全画面用(専用フォルダ)
     private static Context app;
     static String where = "本体";
 
-    /** LruCache.snapshot() でマップ全体をコピーせずに枚数を追跡する。 */
-    private static final AtomicInteger memCount = new AtomicInteger();
     /** キー単位の single-flight。同じ画像の同時デコード・同時JPEG書き込みを防ぐ。 */
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
     private static final Set<String> allInFlight = ConcurrentHashMap.newKeySet();
@@ -51,16 +67,9 @@ final class ThumbCache {
     private static final AtomicInteger writesSincePrune = new AtomicInteger();
 
     static synchronized void init(Context ctx) {
-        if (mem != null) return;
+        if (initialized) return;
         app = ctx.getApplicationContext();
-        mem = new LruCache<String, Bitmap>((int) (Runtime.getRuntime().maxMemory() / 8)) {
-            @Override protected int sizeOf(String key, Bitmap value) {
-                return value.getByteCount();
-            }
-            @Override protected void entryRemoved(boolean evicted, String key, Bitmap oldValue, Bitmap newValue) {
-                memCount.decrementAndGet();
-            }
-        };
+        RamBudget.configure(app);
         File base = null;
         try {
             for (File f : app.getExternalCacheDirs()) {
@@ -79,6 +88,7 @@ final class ThumbCache {
         dir.mkdirs();
         fullDir = new File(base, "full");
         fullDir.mkdirs();
+        initialized = true;
         new Thread(() -> {
             migrateFullCache();
             pruneNow();
@@ -117,32 +127,66 @@ final class ThumbCache {
     }
 
     private static String memKey(Photos.Item it, int px) {
-        return it.path + "|" + it.size + "|" + it.modified + "|" + px;
+        return it.path + "|" + it.size + "|" + px;
     }
 
     private static File fileFor(Photos.Item it, int px) {
         return new File(dir, sha1(memKey(it, px)) + ".jpg");
     }
 
-    /** メモリにあれば返す(画面スレッドから呼んでよい)。 */
+    static void setCurrentBucket(String bucket) {
+        synchronized (RamBudget.LOCK) {
+            if (viewer == null) currentBucket = bucket;
+        }
+    }
+
+    static void enterViewer(ViewerActivity activity, String bucket) {
+        synchronized (RamBudget.LOCK) {
+            viewer = activity;
+            currentBucket = bucket;
+            trimRam(false, Long.MAX_VALUE);
+        }
+    }
+
+    static void leaveViewer(ViewerActivity activity) {
+        synchronized (RamBudget.LOCK) {
+            if (viewer == activity) viewer = null;
+        }
+    }
+
+    /** RamBudget.LOCK の保持中に呼ぶ。 */
+    static long trimRam(boolean current, long bytes) {
+        long removed = 0;
+        Iterator<Map.Entry<String, Thumbnail>> entries = mem.entrySet().iterator();
+        while (entries.hasNext() && removed < bytes) {
+            Thumbnail entry = entries.next().getValue();
+            if (Objects.equals(currentBucket, entry.bucket) != current) continue;
+            removed += entry.bitmap.getByteCount();
+            entries.remove();
+        }
+        memBytes -= removed;
+        return removed;
+    }
+
     static Bitmap memGet(Photos.Item it, int px) {
-        return mem.get(memKey(it, px));
+        synchronized (RamBudget.LOCK) {
+            Thumbnail entry = mem.get(memKey(it, px));
+            return entry == null ? null : entry.bitmap;
+        }
     }
 
-    /** メモリ内のサムネイル数(snapshot を作らずカウンタで返す)。 */
     static int memCount() {
-        return memCount.get();
+        synchronized (RamBudget.LOCK) { return mem.size(); }
     }
 
-    /** メモリ内のサムネイルが占めるバイト数。 */
-    static int memBytes() {
-        return mem == null ? 0 : mem.size();
+    static long memBytes() {
+        synchronized (RamBudget.LOCK) { return memBytes; }
     }
 
     /** メモリ → ディスク → 新規作成の順に探す(裏のスレッドから呼ぶこと)。 */
     static Bitmap get(Photos.Item it, int px) {
         String k = memKey(it, px);
-        Bitmap b = mem.get(k);
+        Bitmap b = memGet(it, px);
         if (b != null) return b;
         FutureTask<Bitmap> task = new FutureTask<>(() -> loadOrCreate(k, it, px));
         Future<Bitmap> f = inFlight.putIfAbsent(k, task);
@@ -169,27 +213,40 @@ final class ThumbCache {
             File largest = fileFor(it, TIER_PX[TIER_PX.length - 1]);
             if (largest.exists()) f = largest;
         }
-        Bitmap b = f.exists() ? BitmapFactory.decodeFile(f.getAbsolutePath()) : null;
+        int priority;
+        synchronized (RamBudget.LOCK) {
+            priority = Objects.equals(currentBucket, it.bucket) ? RamBudget.CURRENT_THUMB : RamBudget.OTHER_THUMB;
+        }
+        Bitmap b = f.exists() ? decodeCached(f, priority) : null;
         if (b != null) {
-            memPut(k, b);
+            memPut(k, it.bucket, b);
             return b;
         }
-        b = generate(it, px);
-        if (b != null) {
-            memPut(k, b);
-            writeJpeg(fileFor(it, px), b);
-        }
+        if (Thread.currentThread().isInterrupted()) return null;
+        b = generateForDisk(it, px, true, RamBudget.GENERATING, fileFor(it, px));
+        if (b != null) memPut(k, it.bucket, b);
         return b;
     }
 
-    private static void memPut(String k, Bitmap b) {
-        mem.put(k, b);
-        memCount.incrementAndGet();
+    private static void memPut(String key, String bucket, Bitmap bitmap) {
+        synchronized (RamBudget.LOCK) {
+            boolean current = Objects.equals(currentBucket, bucket);
+            if ((viewer != null && !current) || mem.containsKey(key)) return;
+            int priority = current ? RamBudget.CURRENT_THUMB : RamBudget.OTHER_THUMB;
+            int bytes = bitmap.getByteCount();
+            if (bytes > RamBudget.limit()) return;
+            if (!RamBudget.makeRoom(bytes, priority)) {
+                trimRam(current, bytes);
+                if (!RamBudget.makeRoom(bytes, priority)) return;
+            }
+            mem.put(key, new Thumbnail(bucket, bitmap));
+            memBytes += bytes;
+        }
     }
 
     /** 未作成のものだけ、または regenerateAll が true なら全サイズを作り直す。 */
     static void ensureAll(Photos.Item it, boolean regenerateAll) {
-        String allKey = it.path + "|" + it.size + "|" + it.modified;
+        String allKey = it.path + "|" + it.size;
         if (!allInFlight.add(allKey)) return;
         try {
             int largest = TIER_PX.length - 1;
@@ -203,17 +260,20 @@ final class ThumbCache {
                 if (need[t]) top = t;
             }
             if (top < 0) return;
-            Bitmap base = generate(it, TIER_PX[top]);
-            if (base == null) return;
-            for (int t = 0; t < TIER_PX.length; t++) {
-                if (!need[t]) continue;
-                Bitmap b = (t == top) ? base : scaleShort(base, TIER_PX[t], 1f);
-                // 縮小されず上位段と同一内容になるファイルは作らない(読み出し時に最大段へフォールバック)。
-                if (b == base && t != top) continue;
-                writeJpeg(fileFor(it, TIER_PX[t]), b);
-                if (b != base) b.recycle();
-            }
-            base.recycle();
+            int topTier = top;
+            Bitmap base = decodeScaled(it, TIER_PX[topTier], true, 1.2f, RamBudget.GENERATING, image -> {
+                for (int tier = 0; tier < TIER_PX.length; tier++) {
+                    if (!need[tier]) continue;
+                    Bitmap scaled = tier == topTier ? image : scaleShort(image, TIER_PX[tier], 1f);
+                    if (scaled == image && tier != topTier) continue;
+                    try {
+                        writeJpeg(fileFor(it, TIER_PX[tier]), scaled);
+                    } finally {
+                        if (scaled != image) scaled.recycle();
+                    }
+                }
+            });
+            if (base != null) base.recycle();
         } finally {
             allInFlight.remove(allKey);
         }
@@ -232,7 +292,7 @@ final class ThumbCache {
     }
 
     /** サムネイル/全画面どちらもここで書き込む。圧縮はロック外、rename だけロック内で行う。 */
-    static void writeJpeg(File f, Bitmap b) {
+    private static void writeJpeg(File f, Bitmap b) {
         final long gen = diskGeneration;
         File parent = f.getParentFile();
         if (parent != null) parent.mkdirs();
@@ -280,12 +340,18 @@ final class ThumbCache {
                 Math.max(1, Math.round(b.getHeight() * sc)), true);
     }
 
-    private static Bitmap generate(Photos.Item it, int px) {
-        return decodeScaled(it, px, true, 1.2f);
+    static Bitmap generateForDisk(Photos.Item item, int px, boolean thumbnail, int priority, File file) {
+        return decodeScaled(item, px, thumbnail, thumbnail ? 1.2f : 0f, priority,
+                bitmap -> writeJpeg(file, bitmap));
     }
 
-    /** サムネイル/全画面どちらも使う元画像デコード。byShortSide と shrinkTol で挙動を変える。 */
-    static Bitmap decodeScaled(Photos.Item it, int px, boolean byShortSide, float shrinkTol) {
+    private interface BitmapOutput {
+        void write(Bitmap bitmap);
+    }
+
+    /** デコードからファイル出力まで、変換途中のビットマップも含めてRAMを予約する。 */
+    private static Bitmap decodeScaled(Photos.Item it, int px, boolean byShortSide,
+                                       float shrinkTol, int priority, BitmapOutput output) {
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
@@ -296,23 +362,47 @@ final class ThumbCache {
             while (base / (s * 2) >= px) s *= 2;
             o.inJustDecodeBounds = false;
             o.inSampleSize = s;
-            Bitmap b = BitmapFactory.decodeFile(it.path, o);
-            if (b == null) return null;
-            if (it.rot != 0) {
-                Matrix m = new Matrix();
-                m.postRotate(it.rot);
-                Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
-                if (r != b) b.recycle();
-                b = r;
+            int copies = (it.rot != 0 || shrinkTol > 0) ? 2 : 1;
+            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, copies);
+            if (!RamBudget.begin(bytes, priority)) return null;
+            try {
+                Bitmap b = BitmapFactory.decodeFile(it.path, o);
+                if (b == null) return null;
+                if (it.rot != 0) {
+                    Matrix m = new Matrix();
+                    m.postRotate(it.rot);
+                    Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                    if (r != b) b.recycle();
+                    b = r;
+                }
+                if (shrinkTol > 0) {
+                    Bitmap r = scaleShort(b, px, shrinkTol);
+                    if (r != b) b.recycle();
+                    b = r;
+                }
+                output.write(b);
+                return b;
+            } finally {
+                RamBudget.end(bytes);
             }
-            if (shrinkTol > 0) {
-                Bitmap r = scaleShort(b, px, shrinkTol);
-                if (r != b) b.recycle();
-                b = r;
-            }
-            return b;
         } catch (Throwable t) {
             return null;
+        }
+    }
+
+    static Bitmap decodeCached(File file, int priority) {
+        BitmapFactory.Options options = new BitmapFactory.Options();
+        options.inJustDecodeBounds = true;
+        String path = file.getAbsolutePath();
+        BitmapFactory.decodeFile(path, options);
+        if (options.outWidth <= 0 || options.outHeight <= 0) return null;
+        long bytes = RamBudget.bitmapBytes(options.outWidth, options.outHeight, 1, 1);
+        if (!RamBudget.begin(bytes, priority)) return null;
+        try {
+            options.inJustDecodeBounds = false;
+            return BitmapFactory.decodeFile(path, options);
+        } finally {
+            RamBudget.end(bytes);
         }
     }
 
@@ -375,7 +465,11 @@ final class ThumbCache {
             diskGeneration++;   // 圧縮中の書き込みをコミットさせない
             for (File f : allFiles(false)) f.delete();
         }
-        if (mem != null) mem.evictAll();
+        synchronized (RamBudget.LOCK) {
+            mem.clear();
+            memBytes = 0;
+            RamBudget.LOCK.notifyAll();
+        }
     }
 
     /** 書き込み中断・プロセスkillで残った古い .tmp を掃除する(完成済みキャッシュは触らない)。 */

@@ -7,9 +7,11 @@ import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
 import android.os.Looper;
+import android.text.InputType;
 import android.view.View;
 import android.view.WindowManager;
 import android.widget.Button;
+import android.widget.EditText;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.Switch;
@@ -35,7 +37,7 @@ public class SettingsActivity extends Activity {
 
     private final Handler h = new Handler(Looper.getMainLooper());
     private TextView cacheInfo, memoryInfo, jobStatus, preloadStatus;
-    private TextView limitV, preloadV, pagesV, preloadAllV;
+    private TextView limitV, preloadV, pagesV, preloadAllV, ramLimitV;
     private Button jobBtn, preloadBtn;
     private Switch regenerate;
     private int pollCount, memoryTick;
@@ -90,6 +92,17 @@ public class SettingsActivity extends Activity {
         memoryInfo.setTextSize(15);
         memoryInfo.setPadding(0, dp(8), 0, dp(8));
         root.addView(memoryInfo);
+
+        ramLimitV = row(root, "画像・一覧のRAM予算", v -> editRamLimit());
+
+        Switch keepZoom = new Switch(this);
+        keepZoom.setText("ズーム時に高解像度画像を読み込む");
+        keepZoom.setTextSize(18);
+        keepZoom.setPadding(0, dp(8), 0, dp(12));
+        keepZoom.setChecked(Prefs.keepZoomBitmap(this));
+        keepZoom.setOnCheckedChangeListener((button, enabled) ->
+                Prefs.sp(this).edit().putBoolean("keepZoomBitmap", enabled).apply());
+        root.addView(keepZoom);
 
         limitV = row(root, "ディスクキャッシュの上限(合計)", v -> choose("ディスクキャッシュの上限(合計)", LIMIT_LABELS,
                 indexOf(LIMITS, Prefs.limitMb(this)), i -> {
@@ -228,6 +241,8 @@ public class SettingsActivity extends Activity {
     }
 
     private void showValues() {
+        int override = Prefs.ramOverrideMb(this);
+        ramLimitV.setText(override == 0 ? "自動（ヒープ上限の半分）" : mb(Prefs.ramLimitBytes(this)));
         limitV.setText(LIMIT_LABELS[indexOf(LIMITS, Prefs.limitMb(this))] + "(超えたら古いものから削除)");
         preloadV.setText(PRELOAD_LABELS[indexOf(PRELOADS, Prefs.preload(this))]
                 + "(左右それぞれ最大 " + Prefs.PRELOAD_MAX + " 枚、合計最大 " + (Prefs.PRELOAD_MAX * 2)
@@ -264,16 +279,14 @@ public class SettingsActivity extends Activity {
         new Thread(() -> {
             Debug.MemoryInfo mi = new Debug.MemoryInfo();
             Debug.getMemoryInfo(mi);
-            long fullRamCap = Runtime.getRuntime().maxMemory() / 2L;
-            int effLimit = ViewerActivity.fullRamLimit();
+            long limit = RamBudget.limit();
             final String text = "アプリ全体(概算・全画面用も含む): " + mb(mi.getTotalPss() * 1024L)
                     + "\nうちサムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
                     + mb(ThumbCache.memBytes())
-                    + "\n全画面RAMの天井(maxMemory/2): " + mb(fullRamCap)
-                    + "\n全画面RAMの実効上限: " + (effLimit > 0 ? mb(effLimit) : "—(ビューア未起動)")
-                    + "\n全画面RAMの使用量: " + (effLimit > 0
-                            ? ViewerActivity.fullRamCount() + " 枚 / " + mb(ViewerActivity.fullRamBytes())
-                            : "—(ビューア未起動)");
+                    + "\n画像・一覧のRAM予算: " + mb(limit)
+                    + "\nAndroidのヒープ上限: " + mb(Runtime.getRuntime().maxMemory())
+                    + "\n全画面RAMの使用量: " + ViewerActivity.fullRamCount()
+                    + " 枚 / " + mb(ViewerActivity.fullRamBytes());
             h.post(() -> {
                 if (destroyed || isFinishing() || memoryInfo == null) return;
                 memoryInfo.setText(text);
@@ -282,7 +295,7 @@ public class SettingsActivity extends Activity {
     }
 
     private static String mb(long bytes) {
-        return String.format("%.1f MB", bytes / 1048576.0);
+        return String.format("%.1f MiB", bytes / 1048576.0);
     }
 
     private String versionName() {
@@ -291,6 +304,42 @@ public class SettingsActivity extends Activity {
         } catch (Exception e) {
             return "?";
         }
+    }
+
+    private void editRamLimit() {
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setSingleLine();
+        int max = Prefs.maxRamOverrideMb();
+        input.setHint("0～" + max + " MiB");
+        int override = Prefs.ramOverrideMb(this);
+        if (override > 0) input.setText(Integer.toString(override));
+        AlertDialog dialog = new AlertDialog.Builder(this)
+                .setTitle("画像・一覧のRAM予算")
+                .setMessage("MiBで入力。空欄または0で自動（ヒープ上限の半分）に戻ります。")
+                .setView(input)
+                .setPositiveButton("保存", null)
+                .setNegativeButton("キャンセル", null)
+                .create();
+        dialog.show();
+        dialog.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener(v -> {
+            String value = input.getText().toString().trim();
+            int mb;
+            try {
+                mb = value.isEmpty() ? 0 : Integer.parseInt(value);
+            } catch (NumberFormatException e) {
+                mb = -1;
+            }
+            if (mb < 0 || mb > max) {
+                input.setError("0～" + max + " MiBで入力してください。");
+                return;
+            }
+            Prefs.sp(this).edit().putInt("ramOverrideMb", mb).apply();
+            RamBudget.configure(this);
+            showValues();
+            updateMemoryInfo();
+            dialog.dismiss();
+        });
     }
 
     private void section(LinearLayout parent, String title) {

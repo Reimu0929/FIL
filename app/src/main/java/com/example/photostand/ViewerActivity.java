@@ -19,6 +19,7 @@ import android.widget.Toast;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
+import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
@@ -38,13 +39,16 @@ public class ViewerActivity extends Activity {
     private ArrayList<Photos.Item> items = new ArrayList<>();
     private LruCache<Integer, Bitmap> cache;
     private ZoomImageView iv;
+    private Bitmap displayed;
+    private int displayedIndex = -1;
+    private long listBytes;
+    private boolean keepZoomBitmap;
     private TextView info, stat, errorView;
     private final Set<Integer> preloadedRam = new HashSet<>();
     private final Set<Integer> preloadedDisk = new HashSet<>();
     /** Settings から参照する、最後に測定した全画面RAMの状態。 */
     private static volatile long lastFullRamBytes;
     private static volatile int lastFullRamCount;
-    private static volatile int lastFullRamLimit;
     /** LruCache.snapshot() のコピーなしでキーを追跡する。 */
     private final Set<Integer> cachedKeys = ConcurrentHashMap.newKeySet();
     /** 同じ idx の先読みタスクを積まないためのキュー。 */
@@ -52,14 +56,12 @@ public class ViewerActivity extends Activity {
     private String title;
     private volatile int index, token, target, thumbPx, preload, preloadTotal;
     private volatile int queryToken;
-    private volatile int maxBitmapBytes;
     private boolean showCount;
 
     private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
 
     static long fullRamBytes() { return lastFullRamBytes; }
     static int fullRamCount() { return lastFullRamCount; }
-    static int fullRamLimit() { return lastFullRamLimit; }
 
     @Override protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -68,6 +70,7 @@ public class ViewerActivity extends Activity {
         ViewCache.init(getApplicationContext());
         thumbPx = ThumbCache.TIER_PX[ThumbCache.tier(this)];
         preload = Prefs.preload(this);
+        keepZoomBitmap = Prefs.keepZoomBitmap(this);
         showCount = Prefs.showCount(this);
 
         String bucket = getIntent().getStringExtra("bucket");
@@ -76,7 +79,7 @@ public class ViewerActivity extends Activity {
 
         DisplayMetrics dm = getResources().getDisplayMetrics();
         target = Math.max(dm.widthPixels, dm.heightPixels);
-        cache = new LruCache<Integer, Bitmap>(initialRamLimit()) {
+        cache = new LruCache<Integer, Bitmap>(Integer.MAX_VALUE) {
             @Override protected int sizeOf(Integer key, Bitmap value) {
                 return value.getByteCount();
             }
@@ -84,6 +87,11 @@ public class ViewerActivity extends Activity {
                 cachedKeys.remove(key);
             }
         };
+
+        synchronized (RamBudget.LOCK) {
+            RamBudget.attachViewer(this);
+            ThumbCache.enterViewer(this, bucket);
+        }
 
         FrameLayout root = new FrameLayout(this);
         root.setBackgroundColor(Color.BLACK);
@@ -97,7 +105,7 @@ public class ViewerActivity extends Activity {
 
             @Override public void onNav(int dir) { step(dir); }
 
-            @Override public void onZoomed() { loadHi(index); }
+            @Override public void onZoomed() { if (keepZoomBitmap) loadHi(index); }
         });
         root.addView(iv, new FrameLayout.LayoutParams(-1, -1));
 
@@ -126,40 +134,54 @@ public class ViewerActivity extends Activity {
         loadItems(bucket);
     }
 
-    /** RAM上限を先読み枚数ベースにする。画質(追加縮小なし)は維持したまま上限だけ見直す。 */
-    private int ramLimitFor(long bytesPerImage) {
-        int slots = Math.max(3, preload * 2 + 1);          // 現在の1枚＋左右 preload 枚
-        long want = bytesPerImage * slots;
-        long cap = Runtime.getRuntime().maxMemory() / 2L;  // OOM 回避の安全上限
-        return (int) Math.max(16L << 20, Math.min(want, cap));
+    private void cacheDecoded(int idx, Bitmap bitmap) {
+        synchronized (RamBudget.LOCK) {
+            if (exCur.isShutdown() || !isInRamWindow(idx, index) || cache.get(idx) != null) return;
+            int bytes = bitmap.getByteCount();
+            int priority = idx == index ? RamBudget.CURRENT : RamBudget.PREFETCH;
+            if (bytes > RamBudget.limit() || !RamBudget.makeRoom(bytes, priority)) return;
+            cachedKeys.add(idx);
+            cache.put(idx, bitmap);
+            recordRamState();
+        }
     }
 
-    private int initialRamLimit() {
-        // 実測前は画面長辺のデコード画像を見積もる。
-        // デコード結果は長辺最大2倍⇒面積4倍、ARGB_8888 で4バイト⇒ target²×16 が見積もり。
-        return ramLimitFor(16L * target * target);
+    /** RamBudget.LOCK の保持中に呼ぶ。 */
+    long retainedRamBytes() {
+        return cache.size() + (displayed == null || cache.get(displayedIndex) == displayed
+                ? 0L : displayed.getByteCount());
     }
 
-    /** 実測した1枚のサイズが大きくなったときだけ上限を引き上げる。 */
-    private void noteBitmapSize(int bytes) {
-        if (bytes <= maxBitmapBytes) return;
-        maxBitmapBytes = bytes;
-        cache.resize(ramLimitFor(bytes));
+    /** RamBudget.LOCK の保持中に呼ぶ。表示画像を残し、古い先読みから外す。 */
+    long trimPrefetchRam(long bytes) {
+        long removed = 0;
+        for (Map.Entry<Integer, Bitmap> entry : cache.snapshot().entrySet()) {
+            if (removed >= bytes) break;
+            if (entry.getKey() == index || entry.getValue() == displayed) continue;
+            cache.remove(entry.getKey());
+            removed += entry.getValue().getByteCount();
+        }
         recordRamState();
+        return removed;
     }
 
-    private void cachePut(int idx, Bitmap b) {
-        cache.put(idx, b);
-        cachedKeys.add(idx);
-        recordRamState();
+    private void displayBitmap(int idx, Bitmap bitmap, boolean zoom) {
+        synchronized (RamBudget.LOCK) {
+            displayed = bitmap;
+            displayedIndex = idx;
+            if (zoom) iv.setImageKeepView(bitmap);
+            else iv.setImageFit(bitmap);
+            RamBudget.makeRoom(0, RamBudget.CURRENT);
+            recordRamState();
+            RamBudget.LOCK.notifyAll();
+        }
     }
 
     /** Settings 表示用に、最後の全画面RAM状態を記録する。 */
     private void recordRamState() {
-        if (cache == null) return;
-        lastFullRamLimit = cache.maxSize();
-        lastFullRamBytes = cache.size();
-        lastFullRamCount = cachedKeys.size();
+        lastFullRamBytes = retainedRamBytes();
+        lastFullRamCount = cachedKeys.size()
+                + (displayed != null && cache.get(displayedIndex) != displayed ? 1 : 0);
     }
 
     /** 一覧を裏で読み込み、終わってから最初の画像を表示する。 */
@@ -167,9 +189,12 @@ public class ViewerActivity extends Activity {
         final int my = ++queryToken;
         exQuery.execute(() -> {
             final ArrayList<Photos.Item> loaded = Photos.load(getContentResolver(), bucket);
+            final long bytes = Photos.estimatedBytes(loaded);
             h.post(() -> {
                 if (my != queryToken || isFinishing() || isDestroyed()) return;
                 items = loaded;
+                RamBudget.replaceListBytes(listBytes, bytes);
+                listBytes = bytes;
                 if (items.isEmpty()) { finish(); return; }
                 index = Math.max(0, Math.min(getIntent().getIntExtra("start", 0), items.size() - 1));
                 show();
@@ -198,8 +223,16 @@ public class ViewerActivity extends Activity {
         exPre.shutdownNow();
         exQuery.shutdownNow();
         exHi.shutdownNow();
-        recordRamState();
-        if (cache != null) cache.evictAll();
+        synchronized (RamBudget.LOCK) {
+            if (cache != null) cache.evictAll();
+            if (iv != null) iv.setImageDrawable(null);
+            displayed = null;
+            if (cache != null) recordRamState();
+            RamBudget.replaceListBytes(listBytes, 0);
+            listBytes = 0;
+            ThumbCache.leaveViewer(this);
+            RamBudget.detachViewer(this);
+        }
         super.onDestroy();
     }
 
@@ -225,22 +258,21 @@ public class ViewerActivity extends Activity {
         final int idx = index;
         if (errorView != null) errorView.setVisibility(View.GONE);
         trimWindow();
-        // 現在画像のデコードを待たずに、隣の先読みを並走させる(連続移動で詰まらないように)。
-        prefetch();
         Bitmap ready = cache.get(idx);
         if (ready != null) {
-            iv.setImageFit(ready);
-            updateStat();
+            displayBitmap(idx, ready, false);
+            prefetch();
             return;
         }
         // 前画像の拡大・移動状態を残さないようにしてから、次の全画面画像を読み込む。
         iv.resetView();
         Bitmap thumb = ThumbCache.memGet(items.get(idx), thumbPx);
         // 移動中に低解像度サムネイルへ差し替えると画像が荒く見えるため、前の全画面画像を保つ。
-        if (thumb != null && iv.getDrawable() == null) iv.setImageFit(thumb);
+        if (thumb != null && iv.getDrawable() == null) displayBitmap(idx, thumb, false);
         exCur.execute(() -> {
             if (my != token) return;
-            Bitmap b = ViewCache.get(items.get(idx), target);
+            Bitmap cached = cache.get(idx);
+            Bitmap b = cached != null ? cached : ViewCache.get(items.get(idx), target, RamBudget.CURRENT);
             if (b == null) {
                 h.post(() -> {
                     if (my != token) return;
@@ -250,26 +282,30 @@ public class ViewerActivity extends Activity {
                 });
                 return;
             }
-            noteBitmapSize(b.getByteCount());
-            cachePut(idx, b);
+            if (cached == null) cacheDecoded(idx, b);
             h.post(() -> {
                 if (my != token) return;
-                iv.setImageFit(b);
+                displayBitmap(idx, b, false);
                 prefetch();
-                updateStat();
             });
         });
+        prefetch();
     }
 
     /** 先読みの範囲(現在位置から左右 preload 枚)の外にある画像を、メモリから外す。 */
     private void trimWindow() {
-        int n = items.size();
-        for (Integer k : new ArrayList<>(cachedKeys)) {
-            int d = Math.abs(k - index);
-            d = Math.min(d, n - d);
-            if (d > preload) cache.remove(k);
+        synchronized (RamBudget.LOCK) {
+            for (Integer k : new ArrayList<>(cachedKeys)) {
+                if (!isInRamWindow(k, index)) cache.remove(k);
+            }
+            recordRamState();
+            RamBudget.LOCK.notifyAll();
         }
-        recordRamState();
+    }
+
+    private boolean isInRamWindow(int idx, int center) {
+        int distance = Math.abs(idx - center);
+        return Math.min(distance, items.size() - distance) <= preload;
     }
 
     /**
@@ -299,16 +335,15 @@ public class ViewerActivity extends Activity {
         if (idx == index || !prefetchQueued.add(idx)) return;
         exPre.execute(() -> {
             try {
+                // 実行待ちの間に通り過ぎた写真はデコードしない。
+                int center = index;
+                if (exPre.isShutdown() || idx == center || !isInRamWindow(idx, center)) return;
                 if (cache.get(idx) == null) {
-                    Bitmap b = ViewCache.get(items.get(idx), target);
+                    Bitmap b = ViewCache.get(items.get(idx), target, RamBudget.PREFETCH);
                     if (b == null) return;
-                    noteBitmapSize(b.getByteCount());
-                    // token が変わっていてもデコード結果は idx に紐づくので捨てない。
-                    // ここで破棄すると移動のたびに先読みが無駄になり、バッファが補充されない。
-                    // (ViewCache.get() は single-flight で他スレッドにも同じ Bitmap を渡すため recycle() はしない)
-                    if (cache.get(idx) == null && cache.size() + b.getByteCount() <= cache.maxSize()) {
-                        cachePut(idx, b);
-                    }
+                    // デコード中に範囲外へ出た写真は RAM キャッシュに追加しない。
+                    // 同じ Bitmap を表示処理が使う場合があるので recycle() はしない。
+                    cacheDecoded(idx, b);
                     // RAM に入らない場合も参照を捨てるだけ。ディスクには保存済み。
                 }
                 // 完了時点の token で表示を更新する(待機中に切り替わっていても最新の状態を反映)。
@@ -322,23 +357,27 @@ public class ViewerActivity extends Activity {
     private void markPreloaded(final int idx, final int my) {
         if (!showCount) return;
         // 現在の先読み範囲外の結果が遅れて来てもカウントしない。
-        int n = items.size();
-        int d = Math.abs(idx - index);
-        d = Math.min(d, n - d);
-        if (idx == index || d > preload) return;
+        int center = index;
+        if (idx == center || !isInRamWindow(idx, center)) return;
         final boolean inRam = cache.get(idx) != null;
         final boolean onDisk = !inRam && ViewCache.has(items.get(idx), target);
         if (!inRam && !onDisk) return;
         h.post(() -> {
             if (my != token) return;
-            if (inRam) preloadedRam.add(idx);
-            else preloadedDisk.add(idx);
+            if (cachedKeys.contains(idx)) {
+                preloadedDisk.remove(idx);
+                preloadedRam.add(idx);
+            } else {
+                preloadedRam.remove(idx);
+                preloadedDisk.add(idx);
+            }
             updateStat();
         });
     }
 
     private void updateStat() {
         if (!showCount) return;
+        preloadedRam.retainAll(cachedKeys);
         stat.setText("先読み: RAM " + preloadedRam.size() + " / ディスク " + preloadedDisk.size()
                 + " / " + preloadTotal + " 枚(左右" + preload + "枚)"
                 + "\nRAM: " + cachedKeys.size() + " 枚 / "
@@ -354,7 +393,7 @@ public class ViewerActivity extends Activity {
             Bitmap b = decodeHi(items.get(idx));
             if (b == null) return;
             h.post(() -> {
-                if (my == token) iv.setImageKeepView(b);
+                if (my == token) displayBitmap(idx, b, true);
                 else b.recycle();   // 表示が切り替わっていたら解放する
             });
         });
@@ -374,15 +413,21 @@ public class ViewerActivity extends Activity {
             if (s >= fit) return null;
             o.inJustDecodeBounds = false;
             o.inSampleSize = s;
-            Bitmap b = BitmapFactory.decodeFile(it.path, o);
-            if (b != null && it.rot != 0) {
-                Matrix m = new Matrix();
-                m.postRotate(it.rot);
-                Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
-                if (r != b) b.recycle();
-                b = r;
+            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, it.rot == 0 ? 1 : 2);
+            if (!RamBudget.begin(bytes, RamBudget.CURRENT)) return null;
+            try {
+                Bitmap b = BitmapFactory.decodeFile(it.path, o);
+                if (b != null && it.rot != 0) {
+                    Matrix m = new Matrix();
+                    m.postRotate(it.rot);
+                    Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
+                    if (r != b) b.recycle();
+                    b = r;
+                }
+                return b;
+            } finally {
+                RamBudget.end(bytes);
             }
-            return b;
         } catch (Throwable t) {
             return null;
         }

@@ -3,7 +3,7 @@ package com.example.photostand;
 import android.content.ContentResolver;
 import android.content.Context;
 import android.util.DisplayMetrics;
-import java.util.ArrayList;
+import android.database.Cursor;
 import java.util.concurrent.atomic.AtomicInteger;
 
 /**
@@ -62,13 +62,10 @@ final class ViewPreloader {
         final ContentResolver cr = ctx.getApplicationContext().getContentResolver();
         final int px = targetPx(ctx.getApplicationContext());
         new Thread(() -> {
-            try {
-                final ArrayList<Photos.Item> all = bucket == null
-                        ? Photos.loadAll(cr)
-                        : Photos.load(cr, bucket);
-                total = all.size();
+            try (Cursor photos = Photos.query(cr, bucket)) {
+                total = photos == null ? 0 : photos.getCount();
                 message = regenerateAll ? "全画面用キャッシュを再生成中" : "未作成の全画面用キャッシュを生成中";
-                Jobs.runWorkers(all, new AtomicInteger(), done, () -> cancel,
+                Jobs.runWorkers(photos, done, () -> cancel,
                         it -> ViewCache.ensure(it, px, regenerateAll));
                 message = cancel ? "停止しました" : "完了";
             } catch (Throwable t) {
