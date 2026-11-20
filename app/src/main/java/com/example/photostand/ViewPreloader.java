@@ -2,7 +2,6 @@ package com.example.photostand;
 
 import android.content.ContentResolver;
 import android.content.Context;
-import android.util.DisplayMetrics;
 import android.database.Cursor;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -22,11 +21,6 @@ final class ViewPreloader {
     private static boolean startupStarted;
     /** 別ジョブ実行中に来たフォルダ要求を保留する。 */
     private static volatile String pendingBucket;
-
-    private static int targetPx(Context c) {
-        DisplayMetrics dm = c.getResources().getDisplayMetrics();
-        return Math.max(dm.widthPixels, dm.heightPixels);
-    }
 
     /** 起動時の自動生成。アプリを起動している間は1回だけ実行する。 */
     static synchronized void startAllOnce(Context ctx) {
@@ -60,7 +54,7 @@ final class ViewPreloader {
         startMs = System.currentTimeMillis();
         message = "写真の一覧を取得中";
         final ContentResolver cr = ctx.getApplicationContext().getContentResolver();
-        final int px = targetPx(ctx.getApplicationContext());
+        final int px = ViewCache.targetPx(ctx);
         new Thread(() -> {
             try (Cursor photos = Photos.query(cr, bucket)) {
                 total = photos == null ? 0 : photos.getCount();

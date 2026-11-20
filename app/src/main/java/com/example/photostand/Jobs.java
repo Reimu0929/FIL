@@ -24,6 +24,7 @@ final class Jobs {
         Thread[] workers = new Thread[2];
         for (int i = 0; i < workers.length; i++) {
             workers[i] = new Thread(() -> {
+                android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_BACKGROUND);
                 for (;;) {
                     Photos.Item item;
                     synchronized (photos) {

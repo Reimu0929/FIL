@@ -8,7 +8,6 @@ import android.graphics.Matrix;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.util.DisplayMetrics;
 import android.util.LruCache;
 import android.view.Gravity;
 import android.view.View;
@@ -17,6 +16,7 @@ import android.widget.FrameLayout;
 import android.widget.TextView;
 import android.widget.Toast;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.Map;
@@ -50,9 +50,9 @@ public class ViewerActivity extends Activity {
     private static volatile long lastFullRamBytes;
     private static volatile int lastFullRamCount;
     /** LruCache.snapshot() のコピーなしでキーを追跡する。 */
-    private final Set<Integer> cachedKeys = ConcurrentHashMap.newKeySet();
+    private final Set<Integer> cachedKeys = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
     /** 同じ idx の先読みタスクを積まないためのキュー。 */
-    private final Set<Integer> prefetchQueued = ConcurrentHashMap.newKeySet();
+    private final Set<Integer> prefetchQueued = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
     private String title;
     private volatile int index, token, target, thumbPx, preload, preloadTotal;
     private volatile int queryToken;
@@ -77,8 +77,7 @@ public class ViewerActivity extends Activity {
         title = getIntent().getStringExtra("name");
         // 写真一覧のクエリは裏スレッドで行う(メインだと数千枚で ANR 級)。
 
-        DisplayMetrics dm = getResources().getDisplayMetrics();
-        target = Math.max(dm.widthPixels, dm.heightPixels);
+        target = ViewCache.targetPx(this);
         cache = new LruCache<Integer, Bitmap>(Integer.MAX_VALUE) {
             @Override protected int sizeOf(Integer key, Bitmap value) {
                 return value.getByteCount();
@@ -289,7 +288,6 @@ public class ViewerActivity extends Activity {
                 prefetch();
             });
         });
-        prefetch();
     }
 
     /** 先読みの範囲(現在位置から左右 preload 枚)の外にある画像を、メモリから外す。 */
@@ -405,15 +403,18 @@ public class ViewerActivity extends Activity {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(it.path, o);
+            if (o.outWidth <= 0 || o.outHeight <= 0) return null;
             int big = Math.max(o.outWidth, o.outHeight);
-            int fit = 1;
-            while (big / (fit * 2) >= target) fit *= 2;
             int s = 1;
-            while (big / s > 4096) s *= 2;
-            if (s >= fit) return null;
+            int copies = it.rot == 0 ? 1 : 2;
+            long cap = Math.min(RamBudget.limit(), Runtime.getRuntime().maxMemory() / 3);
+            while (big / s > 4096 || RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, copies) > cap) {
+                s *= 2;
+            }
+            if (big / s <= target) return null;
             o.inJustDecodeBounds = false;
             o.inSampleSize = s;
-            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, it.rot == 0 ? 1 : 2);
+            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, copies);
             if (!RamBudget.begin(bytes, RamBudget.CURRENT)) return null;
             try {
                 Bitmap b = BitmapFactory.decodeFile(it.path, o);

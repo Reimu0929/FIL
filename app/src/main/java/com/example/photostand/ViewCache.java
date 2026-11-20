@@ -2,7 +2,10 @@ package com.example.photostand;
 
 import android.content.Context;
 import android.graphics.Bitmap;
+import android.graphics.Point;
+import android.view.WindowManager;
 import java.io.File;
+import java.util.Collections;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Future;
@@ -17,11 +20,19 @@ final class ViewCache {
 
     /** パス単位の single-flight。先読みと本表示が同じ画像を同時デコードしないようにする。 */
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
-    private static final Set<String> ensureInFlight = ConcurrentHashMap.newKeySet();
+    private static final Set<String> ensureInFlight = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
 
     static synchronized void init(Context c) {
         // v1 削除と v2 移行は ThumbCache.init() 側のスレッドで一本化している。
         ThumbCache.init(c.getApplicationContext());
+    }
+
+    /** 全画面ではナビゲーションバーも隠す。縦横どちらでも同じキャッシュを使う。 */
+    static int targetPx(Context context) {
+        WindowManager wm = (WindowManager) context.getSystemService(Context.WINDOW_SERVICE);
+        Point size = new Point();
+        wm.getDefaultDisplay().getRealSize(size);
+        return Math.max(size.x, size.y);
     }
 
     private static File fileFor(Photos.Item it, int px) {
@@ -62,7 +73,7 @@ final class ViewCache {
     /** 同じパスの生成を1回だけ行う(single-flight の実体)。 */
     private static Bitmap loadOrCreate(File f, Photos.Item it, int px, int priority) {
         if (f.exists()) {
-            Bitmap b = ThumbCache.decodeCached(f, priority);
+            Bitmap b = ThumbCache.decodeCached(f, px, false, priority);
             if (b != null) return b;
             if (Thread.currentThread().isInterrupted()) return null;
             f.delete();

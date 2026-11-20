@@ -12,6 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.Map;
@@ -29,6 +30,8 @@ import java.util.concurrent.atomic.AtomicInteger;
  */
 final class ThumbCache {
     private ThumbCache() {}
+
+    private static final int MAX_THUMB_EDGE = 2048; // 横長・縦長写真も旧端末のテクスチャに収める
 
     /** サイズ段階: 小・中・大 */
     static final int[] TIER_PX = {160, 256, 384};
@@ -58,7 +61,7 @@ final class ThumbCache {
 
     /** キー単位の single-flight。同じ画像の同時デコード・同時JPEG書き込みを防ぐ。 */
     private static final ConcurrentHashMap<String, Future<Bitmap>> inFlight = new ConcurrentHashMap<>();
-    private static final Set<String> allInFlight = ConcurrentHashMap.newKeySet();
+    private static final Set<String> allInFlight = Collections.newSetFromMap(new ConcurrentHashMap<String, Boolean>());
     private static final char[] HEX = "0123456789abcdef".toCharArray();
     /** 全削除と rename を互斥するロック。 */
     private static final Object diskLock = new Object();
@@ -217,7 +220,7 @@ final class ThumbCache {
         synchronized (RamBudget.LOCK) {
             priority = Objects.equals(currentBucket, it.bucket) ? RamBudget.CURRENT_THUMB : RamBudget.OTHER_THUMB;
         }
-        Bitmap b = f.exists() ? decodeCached(f, priority) : null;
+        Bitmap b = f.exists() ? decodeCached(f, px, true, priority) : null;
         if (b != null) {
             memPut(k, it.bucket, b);
             return b;
@@ -250,7 +253,7 @@ final class ThumbCache {
         if (!allInFlight.add(allKey)) return;
         try {
             int largest = TIER_PX.length - 1;
-            int shortSide = sourceShortSide(it);
+            int shortSide = thumbnailShortSide(it);
             boolean[] need = new boolean[TIER_PX.length];
             int top = -1;
             for (int t = 0; t < TIER_PX.length; t++) {
@@ -261,7 +264,7 @@ final class ThumbCache {
             }
             if (top < 0) return;
             int topTier = top;
-            Bitmap base = decodeScaled(it, TIER_PX[topTier], true, 1.2f, RamBudget.GENERATING, image -> {
+            Bitmap base = decodeScaled(it.path, it.rot, TIER_PX[topTier], true, RamBudget.GENERATING, image -> {
                 for (int tier = 0; tier < TIER_PX.length; tier++) {
                     if (!need[tier]) continue;
                     Bitmap scaled = tier == topTier ? image : scaleShort(image, TIER_PX[tier], 1f);
@@ -279,13 +282,16 @@ final class ThumbCache {
         }
     }
 
-    /** 元画像の短辺(回転しても短辺は変わらない)。段階の要否判定に使う。 */
-    private static int sourceShortSide(Photos.Item it) {
+    /** 長辺を制限した後の短辺。これより大きな段階は最大段を共用する。 */
+    private static int thumbnailShortSide(Photos.Item it) {
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
             BitmapFactory.decodeFile(it.path, o);
-            return Math.min(o.outWidth, o.outHeight);
+            int shortEdge = Math.min(o.outWidth, o.outHeight);
+            int longEdge = Math.max(o.outWidth, o.outHeight);
+            if (longEdge <= MAX_THUMB_EDGE) return shortEdge;
+            return Math.round((float) shortEdge * MAX_THUMB_EDGE / longEdge);
         } catch (Throwable t) {
             return Integer.MAX_VALUE;
         }
@@ -341,7 +347,7 @@ final class ThumbCache {
     }
 
     static Bitmap generateForDisk(Photos.Item item, int px, boolean thumbnail, int priority, File file) {
-        return decodeScaled(item, px, thumbnail, thumbnail ? 1.2f : 0f, priority,
+        return decodeScaled(item.path, item.rot, px, thumbnail, priority,
                 bitmap -> writeJpeg(file, bitmap));
     }
 
@@ -350,60 +356,65 @@ final class ThumbCache {
     }
 
     /** デコードからファイル出力まで、変換途中のビットマップも含めてRAMを予約する。 */
-    private static Bitmap decodeScaled(Photos.Item it, int px, boolean byShortSide,
-                                       float shrinkTol, int priority, BitmapOutput output) {
+    private static Bitmap decodeScaled(String path, int rotation, int px, boolean thumbnail,
+                                       int priority, BitmapOutput output) {
         try {
             BitmapFactory.Options o = new BitmapFactory.Options();
             o.inJustDecodeBounds = true;
-            BitmapFactory.decodeFile(it.path, o);
-            int base = byShortSide ? Math.min(o.outWidth, o.outHeight) : Math.max(o.outWidth, o.outHeight);
-            if (base <= 0) return null;
-            int s = 1;
-            while (base / (s * 2) >= px) s *= 2;
+            BitmapFactory.decodeFile(path, o);
+            int shortEdge = Math.min(o.outWidth, o.outHeight);
+            int longEdge = Math.max(o.outWidth, o.outHeight);
+            if (shortEdge <= 0) return null;
+            int base = thumbnail ? shortEdge : longEdge;
+            int sample = 1;
+            while (base / sample / 2 >= px
+                    || (thumbnail && longEdge / sample / 2 >= MAX_THUMB_EDGE)) sample *= 2;
+            // 表示中の写真や並行処理の余地を残す。極端に大きな写真はデコード前に間引く。
+            long singleDecodeLimit = Runtime.getRuntime().maxMemory() / 3;
+            while (RamBudget.bitmapBytes(o.outWidth, o.outHeight, sample, 1) > singleDecodeLimit) {
+                sample *= 2;
+            }
             o.inJustDecodeBounds = false;
-            o.inSampleSize = s;
-            int copies = (it.rot != 0 || shrinkTol > 0) ? 2 : 1;
-            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, s, copies);
+            o.inSampleSize = sample;
+            // 回転と最終サイズへの縮小を一度の変換で行う。
+            long bytes = RamBudget.bitmapBytes(o.outWidth, o.outHeight, sample, 1);
+            if (rotation != 0 || (thumbnail && output != null) || base > (long) px * sample
+                    || (thumbnail && (long) longEdge > (long) MAX_THUMB_EDGE * sample)) {
+                bytes *= 2;
+            }
             if (!RamBudget.begin(bytes, priority)) return null;
             try {
-                Bitmap b = BitmapFactory.decodeFile(it.path, o);
-                if (b == null) return null;
-                if (it.rot != 0) {
-                    Matrix m = new Matrix();
-                    m.postRotate(it.rot);
-                    Bitmap r = Bitmap.createBitmap(b, 0, 0, b.getWidth(), b.getHeight(), m, true);
-                    if (r != b) b.recycle();
-                    b = r;
+                Bitmap bitmap = BitmapFactory.decodeFile(path, o);
+                if (bitmap == null) return null;
+                int width = bitmap.getWidth(), height = bitmap.getHeight();
+                int decodedLong = Math.max(width, height);
+                float scale = Math.min(1f, (float) px / decodedLong);
+                if (thumbnail) {
+                    int decodedShort = Math.min(width, height);
+                    scale = decodedShort > px * 1.2f ? (float) px / decodedShort : 1f;
+                    scale = Math.min(scale, (float) MAX_THUMB_EDGE / decodedLong);
                 }
-                if (shrinkTol > 0) {
-                    Bitmap r = scaleShort(b, px, shrinkTol);
-                    if (r != b) b.recycle();
-                    b = r;
+                if (rotation != 0 || scale < 1f) {
+                    Matrix transform = new Matrix();
+                    transform.setScale(scale, scale);
+                    transform.postRotate(rotation);
+                    Bitmap resized = Bitmap.createBitmap(bitmap, 0, 0, width, height, transform, true);
+                    if (resized != bitmap) bitmap.recycle();
+                    bitmap = resized;
                 }
-                output.write(b);
-                return b;
+                if (output != null) output.write(bitmap);
+                return bitmap;
             } finally {
                 RamBudget.end(bytes);
             }
-        } catch (Throwable t) {
+        } catch (OutOfMemoryError | RuntimeException e) {
             return null;
         }
     }
 
-    static Bitmap decodeCached(File file, int priority) {
-        BitmapFactory.Options options = new BitmapFactory.Options();
-        options.inJustDecodeBounds = true;
-        String path = file.getAbsolutePath();
-        BitmapFactory.decodeFile(path, options);
-        if (options.outWidth <= 0 || options.outHeight <= 0) return null;
-        long bytes = RamBudget.bitmapBytes(options.outWidth, options.outHeight, 1, 1);
-        if (!RamBudget.begin(bytes, priority)) return null;
-        try {
-            options.inJustDecodeBounds = false;
-            return BitmapFactory.decodeFile(path, options);
-        } finally {
-            RamBudget.end(bytes);
-        }
+    static Bitmap decodeCached(File file, int px, boolean thumbnail, int priority) {
+        // 以前のバージョンで作った大きなJPEGも読み込み時に表示寸法へ合わせる。
+        return decodeScaled(file.getAbsolutePath(), 0, px, thumbnail, priority, null);
     }
 
     static String sha1(String s) {

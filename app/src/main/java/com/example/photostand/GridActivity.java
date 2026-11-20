@@ -40,6 +40,7 @@ public class GridActivity extends Activity {
     private volatile int queryToken;
     private float pages = 1f;
     private boolean showCount;
+    private volatile boolean resumed;
     private GridView grid;
     private BaseAdapter adapter;
     private MenuItem sizeItem;
@@ -137,7 +138,7 @@ public class GridActivity extends Activity {
 
     /** カウンタ表示と先読みを開始する(一覧読み込み完了後 / onResume の両方から呼ぶ)。 */
     private void startStatAndPrefetch() {
-        if (items.isEmpty()) return;
+        if (!resumed || items.isEmpty()) return;
         pages = Prefs.pages(this);
         showCount = Prefs.showCount(this);
         stat.setVisibility(showCount ? View.VISIBLE : View.GONE);
@@ -154,11 +155,13 @@ public class GridActivity extends Activity {
 
     @Override protected void onResume() {
         super.onResume();
+        resumed = true;
         ThumbCache.setCurrentBucket(bucket);
         startStatAndPrefetch();
     }
 
     @Override protected void onPause() {
+        resumed = false;
         h.removeCallbacks(statTick);
         super.onPause();
     }
@@ -206,7 +209,7 @@ public class GridActivity extends Activity {
 
     /** 見えている範囲の前後(設定したページ数ぶん)のサムネイルを、近い順に先に作っておく。 */
     private void prefetch(int first, int visible, int total) {
-        if (visible <= 0 || total <= 0) return;
+        if (!resumed || visible <= 0 || total <= 0) return;
         int extra = Math.round(pages * visible);
         lo = Math.max(0, first - extra);
         hi = Math.min(total - 1, first + visible - 1 + extra);
@@ -226,7 +229,7 @@ public class GridActivity extends Activity {
         if (!queued.add(key)) return;
         exPre.execute(() -> {
             try {
-                if (idx < lo || idx > hi) return;                    // もう範囲外
+                if (!resumed || idx < lo || idx > hi) return;                    // もう範囲外
                 if (px != ThumbCache.TIER_PX[tier]) return;          // サイズが変わった
                 ThumbCache.get(it, px);
             } finally {
@@ -235,23 +238,28 @@ public class GridActivity extends Activity {
         });
     }
 
+    private class Tile extends ImageView {
+        volatile int request;
+
+        Tile() {
+            super(GridActivity.this);
+            setScaleType(ScaleType.CENTER_CROP);
+            setBackgroundColor(Color.DKGRAY);
+        }
+
+        @Override protected void onMeasure(int width, int height) {
+            super.onMeasure(width, width);
+        }
+    }
+
     private class Adapter extends BaseAdapter {
         @Override public int getCount() { return items.size(); }
         @Override public Object getItem(int p) { return items.get(p); }
         @Override public long getItemId(int p) { return p; }
 
         @Override public View getView(int pos, View convert, ViewGroup parent) {
-            ImageView iv = (ImageView) convert;
-            if (iv == null) {
-                iv = new ImageView(GridActivity.this) {
-                    @Override protected void onMeasure(int w, int hh) {
-                        super.onMeasure(w, w); // 正方形のタイル
-                    }
-                };
-                iv.setScaleType(ImageView.ScaleType.CENTER_CROP);
-                iv.setBackgroundColor(Color.DKGRAY);
-            }
-            iv.setTag(pos);
+            final Tile iv = convert == null ? new Tile() : (Tile) convert;
+            final int request = ++iv.request;
             final int px = ThumbCache.TIER_PX[tier];
             final Photos.Item it = items.get(pos);
             Bitmap cached = ThumbCache.memGet(it, px);
@@ -259,17 +267,14 @@ public class GridActivity extends Activity {
                 iv.setImageBitmap(cached);
             } else {
                 iv.setImageBitmap(null);
-                final ImageView target = iv;
-                final int p = pos;
                 ex.execute(() -> {
-                    Object tag = target.getTag();
-                    if (tag == null || (Integer) tag != p) return;      // もう画面外
-                    if (px != ThumbCache.TIER_PX[tier]) return;          // サイズが変わった
+                    if (iv.request != request || px != ThumbCache.TIER_PX[tier]) return;
                     Bitmap t = ThumbCache.get(it, px);
                     if (t == null) return;
                     h.post(() -> {
-                        Object now = target.getTag();
-                        if (now != null && (Integer) now == p) target.setImageBitmap(t);
+                        if (!isDestroyed() && iv.request == request && px == ThumbCache.TIER_PX[tier]) {
+                            iv.setImageBitmap(t);
+                        }
                     });
                 });
             }
