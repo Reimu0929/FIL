@@ -2,6 +2,17 @@
 
 レビュー日: 2026-11-18 / 前提: 機能・UI・挙動はそのまま維持する
 
+> **その後の変更 (2026-11-23, `perf/mediapad-t2`)**
+> - 画像・一覧のRAM予算の既定を `Runtime.maxMemory()/2`（largeHeap 依存）から
+>   `Prefs.DEFAULT_RAM_OVERRIDE_MB = 96` MiB に変更した。下記の `maxMemory/2` は
+>   当時の設計を指す履歴であり、現在の既定値ではない。
+> - `decodeHi()` の実効 cap は `min(RamBudget.limit(), maxMemory/3)` なので、
+>   96MiB 既定では 12MP 写真の拡大用デコードが `inSampleSize=2` に落ちることがある
+>   （画面長辺1920pxに対して約2016px。画質よりメモリ余裕を優先した判断）。
+> - `trimPrefetchRam()` は LRU 順を保つため `cache.snapshot()` 走査のままである。
+>   `cachedKeys` はハッシュ順序かつ `cache.get()` がアクセス順を書き換えるため置換しない。
+> - 独自ランチャーアイコンを追加 (`mipmap-*` / `mipmap-anydpi-v26`)。
+
 ## 🔴 優先度: 高
 
 - [x] **全画面キャッシュが実質フル解像度で、RAM先読みが機能しないケースがある**

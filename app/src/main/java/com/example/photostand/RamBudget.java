@@ -12,7 +12,8 @@ final class RamBudget {
     static final int PHOTO_LIST = 4;
     static final int OTHER_THUMB = 5;
 
-    private static long limit = Runtime.getRuntime().maxMemory() / 2L;
+    // configure() が呼ばれる前も既定値と同じ予算で振る舞わせる。
+    private static long limit = (long) Prefs.DEFAULT_RAM_OVERRIDE_MB << 20;
     private static long photoLists;
     private static long workingBytes;
     private static final int[] waiting = new int[OTHER_THUMB + 1];

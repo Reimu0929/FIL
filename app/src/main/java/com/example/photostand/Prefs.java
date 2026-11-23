@@ -10,6 +10,12 @@ final class Prefs {
     /** 全画面の先読み枚数の上限(左右それぞれ)。 */
     static final int PRELOAD_MAX = 100;
 
+    /**
+     * 画像・一覧のRAM予算の既定値(MiB)。largeHeap だと maxMemory/2 は
+     * 端末の空きメモリと無関係に大きくなるため、2GB端末向けに固定値を採用する。
+     */
+    static final int DEFAULT_RAM_OVERRIDE_MB = 96;
+
     static SharedPreferences sp(Context c) {
         return c.getSharedPreferences("ps", Context.MODE_PRIVATE);
     }
@@ -17,11 +23,10 @@ final class Prefs {
     /** サムネイルキャッシュの上限(MB) */
     static int limitMb(Context c) { return sp(c).getInt("limitMb", 300); }
 
-    /**
-     * 全画面キャッシュのRAM上限(MB)。0 は「自動(maxMemory/2)」だったが、
-     * largeHeap だと端末の空きと無関係に大きくなるため、2GB端末向けに 96MB を既定とする。
-     */
-    static int ramOverrideMb(Context c) { return sp(c).getInt("ramOverrideMb", 96); }
+    /** 全画面キャッシュのRAM上限(MB)。0 は「自動(maxMemory/2)」。 */
+    static int ramOverrideMb(Context c) {
+        return sp(c).getInt("ramOverrideMb", DEFAULT_RAM_OVERRIDE_MB);
+    }
 
     static int maxRamOverrideMb() {
         return (int) Math.min(Integer.MAX_VALUE >> 20, Runtime.getRuntime().maxMemory() >> 20);

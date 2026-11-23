@@ -50,7 +50,8 @@ public class GridActivity extends Activity {
         @Override public void run() {
             stat.setText("サムネイルのRAMキャッシュ: " + ThumbCache.memCount() + " 枚 / "
                     + String.format("%.1f MB", ThumbCache.memBytes() / 1048576.0));
-            h.postDelayed(this, 700);
+            // カウンタ表示の更新だけなので、アイドル時は負荷を下げる。
+            h.postDelayed(this, 2000);
         }
     };
 
