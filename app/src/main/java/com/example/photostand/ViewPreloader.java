@@ -45,7 +45,11 @@ final class ViewPreloader {
     }
 
     private static synchronized void start(Context ctx, String bucket, final boolean regenerateAll) {
-        if (running) return;
+        if (running) {
+            // finally からの再開要求と startFolder() が競合した場合も要求を落とさない。
+            if (bucket != null) pendingBucket = bucket;
+            return;
+        }
         ViewCache.init(ctx.getApplicationContext());
         running = true;
         cancel = false;

@@ -98,19 +98,21 @@ final class ThumbCache {
         }).start();
     }
 
-    /** 旧バージョンは全画面用も thumbs に混在していたので、full フォルダへ移行する。 */
+    /**
+     * 旧バージョンの全画面キャッシュ(v1/v2)を削除する。
+     * 旧版は thumbs に混在していたため両フォルダを見る。v3 は寸法・画質の仕様が
+     * 変わっているので旧ファイルは再利用せず、消して作り直す。
+     */
     private static void migrateFullCache() {
-        File[] fs = dir == null ? null : dir.listFiles();
-        if (fs == null || fullDir == null) return;
-        for (File f : fs) {
-            String name = f.getName();
-            if (name.matches("v[0-9a-f]{40}\\.jpg")) {
-                // v1 の全画面キャッシュは旧形式なので削除。
-                f.delete();
-            } else if (name.matches("v2[0-9a-f]{40}\\.jpg")) {
-                File dst = new File(fullDir, name);
-                if (!dst.exists()) f.renameTo(dst);
-                else f.delete();
+        File[] thumbs = dir == null ? null : dir.listFiles();
+        File[] full = fullDir == null ? null : fullDir.listFiles();
+        for (File[] fs : new File[][]{thumbs, full}) {
+            if (fs == null) continue;
+            for (File f : fs) {
+                String name = f.getName();
+                if (name.matches("v[0-9a-f]{40}\\.jpg") || name.matches("v2[0-9a-f]{40}\\.jpg")) {
+                    f.delete();
+                }
             }
         }
     }
@@ -264,13 +266,16 @@ final class ThumbCache {
             }
             if (top < 0) return;
             int topTier = top;
+            // 世代は「生成を始めた時点」で記録する。デコード中に全削除された結果を
+            // 書き戻さないため、圧縮開始時ではなくここで取得する。
+            final long gen = diskGeneration;
             Bitmap base = decodeScaled(it.path, it.rot, TIER_PX[topTier], true, RamBudget.GENERATING, image -> {
                 for (int tier = 0; tier < TIER_PX.length; tier++) {
                     if (!need[tier]) continue;
                     Bitmap scaled = tier == topTier ? image : scaleShort(image, TIER_PX[tier], 1f);
                     if (scaled == image && tier != topTier) continue;
                     try {
-                        writeJpeg(fileFor(it, TIER_PX[tier]), scaled);
+                        writeJpeg(fileFor(it, TIER_PX[tier]), scaled, gen);
                     } finally {
                         if (scaled != image) scaled.recycle();
                     }
@@ -297,9 +302,12 @@ final class ThumbCache {
         }
     }
 
-    /** サムネイル/全画面どちらもここで書き込む。圧縮はロック外、rename だけロック内で行う。 */
-    private static void writeJpeg(File f, Bitmap b) {
-        final long gen = diskGeneration;
+    /**
+     * サムネイル/全画面どちらもここで書き込む。圧縮はロック外、rename だけロック内で行う。
+     * gen は生成を開始した時点の {@link #diskGeneration}。デコード開始後に全削除が
+     * 走っていれば、結果をディスクへ戻さない。
+     */
+    private static void writeJpeg(File f, Bitmap b, long gen) {
         File parent = f.getParentFile();
         if (parent != null) parent.mkdirs();
         File tmp = new File(parent, f.getName() + "." + UUID.randomUUID() + ".tmp");
@@ -347,8 +355,10 @@ final class ThumbCache {
     }
 
     static Bitmap generateForDisk(Photos.Item item, int px, boolean thumbnail, int priority, File file) {
+        // 圧縮の成否判定はデコード開始前の世代で行う(全削除中のデコードを書き戻さない)。
+        final long gen = diskGeneration;
         return decodeScaled(item.path, item.rot, px, thumbnail, priority,
-                bitmap -> writeJpeg(file, bitmap));
+                bitmap -> writeJpeg(file, bitmap, gen));
     }
 
     private interface BitmapOutput {
@@ -473,7 +483,7 @@ final class ThumbCache {
     /** ディスクとメモリのキャッシュをすべて消す(裏書き込みと競合しない)。 */
     static void clearDisk() {
         synchronized (diskLock) {
-            diskGeneration++;   // 圧縮中の書き込みをコミットさせない
+            diskGeneration++;   // 削除前に始まったデコード・圧縮は書き戻させない
             for (File f : allFiles(false)) f.delete();
         }
         synchronized (RamBudget.LOCK) {
