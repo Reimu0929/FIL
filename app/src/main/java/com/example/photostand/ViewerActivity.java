@@ -156,13 +156,13 @@ public class ViewerActivity extends Activity {
     /** RamBudget.LOCK の保持中に呼ぶ。表示画像を残し、古い先読みから外す。 */
     long trimPrefetchRam(long bytes) {
         long removed = 0;
-        // cache.snapshot() はエントリごとコピーするため、追跡用の cachedKeys を直接たどる。
-        for (Integer key : new ArrayList<>(cachedKeys)) {
+        // snapshot() は LinkedHashMap を古い順に返す。cachedKeys はハッシュ順序なので
+        // ここでは置き換えない（get() もアクセス順を書き換えてしまう）。
+        for (Map.Entry<Integer, Bitmap> entry : cache.snapshot().entrySet()) {
             if (removed >= bytes) break;
-            Bitmap b = cache.get(key);
-            if (b == null || key == index || b == displayed) continue;
-            cache.remove(key);
-            removed += b.getByteCount();
+            if (entry.getKey() == index || entry.getValue() == displayed) continue;
+            cache.remove(entry.getKey());
+            removed += entry.getValue().getByteCount();
         }
         recordRamState();
         return removed;
