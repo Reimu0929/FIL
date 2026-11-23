@@ -41,6 +41,8 @@ public class ViewerActivity extends Activity {
     private ZoomImageView iv;
     private Bitmap displayed;
     private int displayedIndex = -1;
+    /** 直前の displayed が LruCache / ThumbCache に無い固有のビットマップ(拡大表示)か。 */
+    private boolean displayedUnique;
     private long listBytes;
     private boolean keepZoomBitmap;
     private TextView info, stat, errorView;
@@ -154,11 +156,13 @@ public class ViewerActivity extends Activity {
     /** RamBudget.LOCK の保持中に呼ぶ。表示画像を残し、古い先読みから外す。 */
     long trimPrefetchRam(long bytes) {
         long removed = 0;
-        for (Map.Entry<Integer, Bitmap> entry : cache.snapshot().entrySet()) {
+        // cache.snapshot() はエントリごとコピーするため、追跡用の cachedKeys を直接たどる。
+        for (Integer key : new ArrayList<>(cachedKeys)) {
             if (removed >= bytes) break;
-            if (entry.getKey() == index || entry.getValue() == displayed) continue;
-            cache.remove(entry.getKey());
-            removed += entry.getValue().getByteCount();
+            Bitmap b = cache.get(key);
+            if (b == null || key == index || b == displayed) continue;
+            cache.remove(key);
+            removed += b.getByteCount();
         }
         recordRamState();
         return removed;
@@ -166,13 +170,18 @@ public class ViewerActivity extends Activity {
 
     private void displayBitmap(int idx, Bitmap bitmap, boolean zoom) {
         synchronized (RamBudget.LOCK) {
+            Bitmap old = displayed;
+            boolean oldUnique = displayedUnique;
             displayed = bitmap;
             displayedIndex = idx;
+            displayedUnique = zoom;
             if (zoom) iv.setImageKeepView(bitmap);
             else iv.setImageFit(bitmap);
             RamBudget.makeRoom(0, RamBudget.CURRENT);
             recordRamState();
             RamBudget.LOCK.notifyAll();
+            // 拡大用のビットマップだけが固有。LruCache / ThumbCache と共有している物は recycle しない。
+            if (oldUnique && old != null && old != bitmap) old.recycle();
         }
     }
 
@@ -225,7 +234,9 @@ public class ViewerActivity extends Activity {
         synchronized (RamBudget.LOCK) {
             if (cache != null) cache.evictAll();
             if (iv != null) iv.setImageDrawable(null);
+            if (displayedUnique && displayed != null) displayed.recycle();
             displayed = null;
+            displayedUnique = false;
             if (cache != null) recordRamState();
             RamBudget.replaceListBytes(listBytes, 0);
             listBytes = 0;

@@ -1,0 +1,35 @@
+<?xml version="1.0" encoding="utf-8"?>
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="108dp"
+    android:height="108dp"
+    android:viewportWidth="108"
+    android:viewportHeight="108">
+
+    <!-- 写真のフレーム (セーフゾーン内) -->
+    <path
+        android:fillColor="#13233D"
+        android:strokeColor="#38BDF8"
+        android:strokeWidth="2.5"
+        android:pathData="M30,24H78A6,6 0 0 1 84,30V78A6,6 0 0 1 78,84H30A6,6 0 0 1 24,78V30A6,6 0 0 1 30,24Z" />
+
+    <!-- 太陽 -->
+    <path android:fillColor="#FBBF24" android:pathData="M79.8,41.3a6.3,6.3 0 1,1 -12.6,0a6.3,6.3 0 1,1 12.6,0" />
+
+    <!-- 奥の山 -->
+    <path
+        android:fillColor="#8B5CF6"
+        android:pathData="M31.6,75.9L52.7,50.6L67.5,67.5L75.9,59.1L84.4,73.8V80.2H31.6Z" />
+
+    <!-- 手前の山 -->
+    <path
+        android:fillColor="#22D3EE"
+        android:pathData="M29.5,80.2L46.4,61.2L63.3,80.2Z" />
+
+    <!-- フレーム左上のハイライト -->
+    <path
+        android:fillColor="#00000000"
+        android:pathData="M25.3,31.6V30A5,5 0 0 1 30.3,25H31.6"
+        android:strokeColor="#7DD3FC"
+        android:strokeWidth="2.1"
+        android:strokeLineCap="round" />
+</vector>

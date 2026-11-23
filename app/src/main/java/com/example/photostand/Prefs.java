@@ -17,7 +17,11 @@ final class Prefs {
     /** サムネイルキャッシュの上限(MB) */
     static int limitMb(Context c) { return sp(c).getInt("limitMb", 300); }
 
-    static int ramOverrideMb(Context c) { return sp(c).getInt("ramOverrideMb", 0); }
+    /**
+     * 全画面キャッシュのRAM上限(MB)。0 は「自動(maxMemory/2)」だったが、
+     * largeHeap だと端末の空きと無関係に大きくなるため、2GB端末向けに 96MB を既定とする。
+     */
+    static int ramOverrideMb(Context c) { return sp(c).getInt("ramOverrideMb", 96); }
 
     static int maxRamOverrideMb() {
         return (int) Math.min(Integer.MAX_VALUE >> 20, Runtime.getRuntime().maxMemory() >> 20);
