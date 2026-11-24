@@ -2,7 +2,6 @@ package com.example.photostand;
 
 import android.app.Activity;
 import android.app.AlertDialog;
-import android.graphics.Color;
 import android.os.Bundle;
 import android.os.Debug;
 import android.os.Handler;
@@ -46,6 +45,11 @@ public class SettingsActivity extends Activity {
     private static final long POLL_BUSY_MS = 500;
     private static final long POLL_IDLE_MS = 2000;
 
+    // 文字色は3段階に統一する（テーマ既定色は使わない）。
+    private static final int TEXT_PRIMARY = 0xFF212121;    // 項目名・見出し本文
+    private static final int TEXT_SECONDARY = 0xFF616161;  // 補足・状態・バージョン
+    private static final int TEXT_SECTION = 0xFF006064;    // セクション見出し（濃いティール）
+
     private final Runnable poll = new Runnable() {
         @Override public void run() {
             boolean busy = CacheJob.running || ViewPreloader.running;
@@ -84,12 +88,14 @@ public class SettingsActivity extends Activity {
         section(root, "ディスクキャッシュの状況");
         cacheInfo = new TextView(this);
         cacheInfo.setTextSize(15);
+        cacheInfo.setTextColor(TEXT_PRIMARY);
         cacheInfo.setPadding(0, dp(8), 0, dp(8));
         root.addView(cacheInfo);
 
         section(root, "RAM使用量");
         memoryInfo = new TextView(this);
         memoryInfo.setTextSize(15);
+        memoryInfo.setTextColor(TEXT_PRIMARY);
         memoryInfo.setPadding(0, dp(8), 0, dp(8));
         root.addView(memoryInfo);
 
@@ -98,6 +104,7 @@ public class SettingsActivity extends Activity {
         Switch keepZoom = new Switch(this);
         keepZoom.setText("ズーム時に高解像度画像を読み込む");
         keepZoom.setTextSize(18);
+        keepZoom.setTextColor(TEXT_PRIMARY);
         keepZoom.setPadding(0, dp(8), 0, dp(12));
         keepZoom.setChecked(Prefs.keepZoomBitmap(this));
         keepZoom.setOnCheckedChangeListener((button, enabled) ->
@@ -137,6 +144,7 @@ public class SettingsActivity extends Activity {
         regenerate = new Switch(this);
         regenerate.setText("キャッシュ済みの写真も再生成する");
         regenerate.setTextSize(18);
+        regenerate.setTextColor(TEXT_PRIMARY);
         regenerate.setPadding(0, dp(12), 0, dp(4));
         regenerate.setChecked(Prefs.regenerateAll(this));
         regenerate.setOnCheckedChangeListener((b, on) -> {
@@ -147,7 +155,7 @@ public class SettingsActivity extends Activity {
         TextView generationNote = new TextView(this);
         generationNote.setText("オフ: 未作成のキャッシュだけを生成\nオン: キャッシュ済みも含めて全件再生成");
         generationNote.setTextSize(14);
-        generationNote.setTextColor(Color.GRAY);
+        generationNote.setTextColor(TEXT_SECONDARY);
         generationNote.setPadding(0, 0, 0, dp(8));
         root.addView(generationNote);
 
@@ -159,7 +167,7 @@ public class SettingsActivity extends Activity {
         root.addView(jobBtn);
         jobStatus = new TextView(this);
         jobStatus.setTextSize(14);
-        jobStatus.setTextColor(Color.GRAY);
+        jobStatus.setTextColor(TEXT_SECONDARY);
         jobStatus.setPadding(0, dp(4), 0, dp(8));
         root.addView(jobStatus);
 
@@ -178,7 +186,7 @@ public class SettingsActivity extends Activity {
         root.addView(preloadBtn);
         preloadStatus = new TextView(this);
         preloadStatus.setTextSize(14);
-        preloadStatus.setTextColor(Color.GRAY);
+        preloadStatus.setTextColor(TEXT_SECONDARY);
         preloadStatus.setPadding(0, dp(4), 0, dp(8));
         root.addView(preloadStatus);
 
@@ -197,6 +205,7 @@ public class SettingsActivity extends Activity {
         Switch sw = new Switch(this);
         sw.setText("キャッシュ枚数とRAM使用量を写真画面に表示");
         sw.setTextSize(18);
+        sw.setTextColor(TEXT_PRIMARY);
         sw.setPadding(0, dp(16), 0, dp(16));
         sw.setChecked(Prefs.showCount(this));
         sw.setOnCheckedChangeListener((b, on) -> Prefs.sp(this).edit().putBoolean("showCount", on).apply());
@@ -204,7 +213,7 @@ public class SettingsActivity extends Activity {
 
         TextView version = new TextView(this);
         version.setTextSize(12);
-        version.setTextColor(Color.GRAY);
+        version.setTextColor(TEXT_SECONDARY);
         version.setPadding(0, dp(24), 0, 0);
         version.setText("フォトビューア  バージョン " + versionName());
         root.addView(version);
@@ -346,7 +355,7 @@ public class SettingsActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(title);
         t.setTextSize(14);
-        t.setTextColor(0xFFE8C26A);
+        t.setTextColor(TEXT_SECTION);
         t.setPadding(0, dp(20), 0, dp(4));
         parent.addView(t);
     }
@@ -358,9 +367,10 @@ public class SettingsActivity extends Activity {
         TextView t = new TextView(this);
         t.setText(title);
         t.setTextSize(18);
+        t.setTextColor(TEXT_PRIMARY);
         TextView v = new TextView(this);
         v.setTextSize(14);
-        v.setTextColor(Color.GRAY);
+        v.setTextColor(TEXT_SECONDARY);
         r.addView(t);
         r.addView(v);
         r.setOnClickListener(l);

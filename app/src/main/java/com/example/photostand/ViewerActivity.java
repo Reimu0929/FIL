@@ -45,7 +45,7 @@ public class ViewerActivity extends Activity {
     private boolean displayedUnique;
     private long listBytes;
     private boolean keepZoomBitmap;
-    private TextView info, stat, errorView;
+    private TextView stat, errorView;
     private final Set<Integer> preloadedRam = new HashSet<>();
     private final Set<Integer> preloadedDisk = new HashSet<>();
     /** Settings から参照する、最後に測定した全画面RAMの状態。 */
@@ -55,12 +55,9 @@ public class ViewerActivity extends Activity {
     private final Set<Integer> cachedKeys = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
     /** 同じ idx の先読みタスクを積まないためのキュー。 */
     private final Set<Integer> prefetchQueued = Collections.newSetFromMap(new ConcurrentHashMap<Integer, Boolean>());
-    private String title;
     private volatile int index, token, target, thumbPx, preload, preloadTotal;
     private volatile int queryToken;
     private boolean showCount;
-
-    private final Runnable hideInfo = () -> info.setVisibility(View.GONE);
 
     static long fullRamBytes() { return lastFullRamBytes; }
     static int fullRamCount() { return lastFullRamCount; }
@@ -76,7 +73,6 @@ public class ViewerActivity extends Activity {
         showCount = Prefs.showCount(this);
 
         String bucket = getIntent().getStringExtra("bucket");
-        title = getIntent().getStringExtra("name");
         // 写真一覧のクエリは裏スレッドで行う(メインだと数千枚で ANR 級)。
 
         target = ViewCache.targetPx(this);
@@ -99,9 +95,9 @@ public class ViewerActivity extends Activity {
         iv = new ZoomImageView(this);
         iv.setListener(new ZoomImageView.Listener() {
             @Override public void onTap(float x, float width) {
+                // 中央タップは何もしない（詳細表示は廃止）。
                 if (x < width / 3) step(-1);
                 else if (x > width * 2 / 3) step(1);
-                else showInfo();
             }
 
             @Override public void onNav(int dir) { step(dir); }
@@ -110,13 +106,6 @@ public class ViewerActivity extends Activity {
         });
         root.addView(iv, new FrameLayout.LayoutParams(-1, -1));
 
-        info = new TextView(this);
-        info.setTextColor(Color.WHITE);
-        info.setTextSize(16);
-        info.setShadowLayer(6, 0, 0, Color.BLACK);
-        info.setPadding(40, 24, 40, 40);
-        info.setVisibility(View.GONE);
-        root.addView(info, new FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM | Gravity.START));
         stat = new TextView(this);
         stat.setTextColor(Color.WHITE);
         stat.setTextSize(13);
@@ -251,15 +240,6 @@ public class ViewerActivity extends Activity {
         int n = items.size();
         index = ((index + d) % n + n) % n;
         show();
-        if (info.getVisibility() == View.VISIBLE) showInfo();
-    }
-
-    private void showInfo() {
-        if (items.isEmpty()) return;
-        info.setText(items.get(index).name + "\n" + title + "   " + (index + 1) + " / " + items.size());
-        info.setVisibility(View.VISIBLE);
-        h.removeCallbacks(hideInfo);
-        h.postDelayed(hideInfo, 2500);
     }
 
     /** 今の写真を表示する。先読み済みなら即表示、なければサムネイルを仮に出す。 */
