@@ -45,10 +45,10 @@ public class SettingsActivity extends Activity {
     private static final long POLL_BUSY_MS = 500;
     private static final long POLL_IDLE_MS = 2000;
 
-    // 文字色は3段階に統一する（テーマ既定色は使わない）。
-    private static final int TEXT_PRIMARY = 0xFF212121;    // 項目名・見出し本文
-    private static final int TEXT_SECONDARY = 0xFF616161;  // 補足・状態・バージョン
-    private static final int TEXT_SECTION = 0xFF006064;    // セクション見出し（濃いティール）
+    // 文字色は3段階に統一する。実機(EMUI)ではダーク系で描画されるため明るい色を使う。
+    private static final int TEXT_PRIMARY = 0xFFF5F5F5;    // 項目名・ info（ほぼ白）
+    private static final int TEXT_SECONDARY = 0xFFB0BEC5;  // 補足・状態・バージョン（明るい灰）
+    private static final int TEXT_SECTION = 0xFF4DD0E1;    // セクション見出し（シアン）
 
     private final Runnable poll = new Runnable() {
         @Override public void run() {
